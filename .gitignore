@@ -1,0 +1,21 @@
+
+*.bin
+*.hex
+*.out
+
+*.o
+*.O
+*.i
+
+JLinkLog.txt
+
+# IAR
+Exe/
+List/
+Obj/
+BrowseInfo/
+
+# MDK
+List*/
+Obj*/
+
