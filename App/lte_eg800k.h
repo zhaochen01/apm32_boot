@@ -7,6 +7,7 @@
 
 
 #define UART3_RX_BUF_SIZE 512
+#define LTE_READ_CHUNK_SIZE 40960U
 
 
 /************************* 1. 定义回调函数类型 *************************/
@@ -22,7 +23,7 @@ extern volatile uint8_t RX_FLAG;
 extern volatile uint32_t FILE_SIZE;
 extern uint16_t uart3_rx_len;
 extern uint8_t uart3_rx_buf[UART3_RX_BUF_SIZE];
-extern uint8_t up_file_buf[2048];
+extern uint8_t up_file_buf[LTE_READ_CHUNK_SIZE];
 void eg800k_init(void);
 extern uint8_t get_uart3_flag(void);
 extern int32_t CheckResp(char *target_resp);

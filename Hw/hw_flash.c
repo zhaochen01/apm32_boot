@@ -29,20 +29,27 @@ int32_t hw_flash_erase(uint32_t addrStart, uint32_t size)
 
 int32_t hw_flash_write(uint32_t addrStart, const void *pdata, uint32_t size)
 {
-  uint32_t  *p = (uint32_t *)pdata;
-  uint32_t  count;
-  uint8_t   psize = sizeof(uint32_t);
-//  if( (size / psize) == 0 ) count = size / psize;
-//  else  count = size / psize + 1;
-  
-  // è®¡ç®—éœ€è¦ç¼–ç¨‹çš„å­—æ•°é‡ï¼ˆå‘ä¸Šå–æ•´ï¼‰
-  count = (size + 4 - 1) / 4;
-  
-  
+  const uint8_t *p = (const uint8_t *)pdata;
+  uint32_t offset = 0U;
+  uint32_t word = 0xFFFFFFFFU; /* Î²×Ö½Ú°´²Á³ıÌ¬0xFF²¹Æë£¬±ÜÃâĞ´ÈëÔàÊı¾İ */
+
   FMC_Unlock();
-  for(uint32_t i = 0; i < count; i++)
+  while(offset < size)
   {
-    FMC_ProgramWord(addrStart + i * psize, *p++);
+    word = 0xFFFFFFFFU;
+    if((size - offset) >= 4U)
+    {
+      memcpy(&word, p + offset, 4U);
+      FMC_ProgramWord(addrStart + offset, word);
+      offset += 4U;
+    }
+    else
+    {
+      uint8_t rem = (uint8_t)(size - offset);
+      memcpy(&word, p + offset, rem);
+      FMC_ProgramWord(addrStart + offset, word);
+      break;
+    }
   }
   FMC_Lock();
   return 0;
@@ -54,7 +61,7 @@ int32_t hw_flash_read(uint32_t addrStart, void *pdata, uint32_t size)
   uint8_t *p = (uint8_t *)pdata;
   while(size--)
   {
-    *p++ = (*(__IO uint8_t*) addrStart++);  // è¯»æŒ‡å®šåœ°å€çš„ä¸€ä¸ªæ•°æ®
+    *p++ = (*(__IO uint8_t*) addrStart++);  // ¶ÁÖ¸¶¨µØÖ·µÄÒ»¸öÊı¾İ
 //    addrStart += 1;
   }
   return 0;

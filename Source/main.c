@@ -104,7 +104,7 @@ int32_t get_data_len( char *pdat)
     p++;
   }
 
-  if((val == 0U) || (val > FLASH_PAGE_SIZE))
+  if((val == 0U) || (val > LTE_READ_CHUNK_SIZE))
   {
     return -1;
   }
@@ -157,7 +157,7 @@ int32_t get_file_len(char *pdat)
 
 int32_t get_qfopen_fd(char *pdat)
 {
-  int32_t fd = -1;
+  int32_t fd = 0;
   char *p = NULL;
 
   if(pdat == NULL)
@@ -166,12 +166,24 @@ int32_t get_qfopen_fd(char *pdat)
   }
 
   p = strstr(pdat, "+QFOPEN:");
-  if((p != NULL) && (sscanf(p, "+QFOPEN: %d", &fd) == 1))
+  if(p != NULL)
   {
-    if(fd >= 0)
+    p = strchr(p, ':');
+    if(p != NULL)
     {
-      printf("QFOPEN fd:%d\r\n", fd);
-      return fd;
+      p++;
+      while((*p == ' ') || (*p == '\t')) p++;
+      if((*p >= '0') && (*p <= '9'))
+      {
+        fd = 0;
+        while((*p >= '0') && (*p <= '9'))
+        {
+          fd = (fd * 10) + (*p - '0');
+          p++;
+        }
+        printf("QFOPEN fd:%d\r\n", fd);
+        return fd;
+      }
     }
   }
 
@@ -207,7 +219,7 @@ void TMR5_IRQHandler(void)
         Hw_WDT_Cfg.port->BSC  = Hw_WDT_Cfg.pin;
         Hw_RUN_Cfg.port->BSC  = Hw_RUN_Cfg.pin;
         Hw_DATA_Cfg.port->BSC = Hw_DATA_Cfg.pin;
-        Hw_RUN_Cfg.port->BSC  = Hw_SIM_Cfg.pin;
+        Hw_SIM_Cfg.port->BSC  = Hw_SIM_Cfg.pin;
         i = 0;
       }
     
@@ -271,16 +283,56 @@ uint32_t CRC32(uint8_t *data, uint32_t length)
     return ~crc;
 }
 
+static uint32_t flash_align_page(uint32_t size)
+{
+  return (size + FLASH_PAGE_SIZE - 1U) & (~(FLASH_PAGE_SIZE - 1U));
+}
+
+static int32_t flash_erase_with_wdt(uint32_t addr, uint32_t size)
+{
+  uint32_t erase_len = flash_align_page(size);
+  uint32_t offset = 0U;
+
+  while(offset < erase_len)
+  {
+    IWDT_Refresh();
+    (void)hw_flash_erase(addr + offset, FLASH_PAGE_SIZE);
+    offset += FLASH_PAGE_SIZE;
+  }
+  IWDT_Refresh();
+  return 0;
+}
+
+static int32_t flash_write_with_wdt(uint32_t addr, const uint8_t *data, uint32_t size)
+{
+  uint32_t offset = 0U;
+  uint32_t chunk = 0U;
+
+  while(offset < size)
+  {
+    chunk = size - offset;
+    if(chunk > FLASH_PAGE_SIZE)
+    {
+      chunk = FLASH_PAGE_SIZE;
+    }
+    IWDT_Refresh();
+    (void)hw_flash_write(addr + offset, data + offset, chunk);
+    offset += chunk;
+  }
+  IWDT_Refresh();
+  return 0;
+}
+
 
 int32_t iap_upgrade( uint8_t up_flag)
 {
-  uint32_t file_len = upgrade.size, file_count = 2048;
+  uint32_t expect_size = 0U, file_len = 0U, file_count = LTE_READ_CHUNK_SIZE;
   uint32_t crc, erase_count, up_file_addr = upgrade_cfg.fw1_addr; /* 默认地址 */
   uint32_t write_offset = 0;
   uint32_t read_wait_cnt = 0;
   uint8_t read_retry_cnt = 0;
   int32_t qf_fd = -1;
-  char qfread_cmd[32];
+  char qfread_cmd[40];
   char qfclose_cmd[24];
   
   static uint8_t fw_flag = 0, up_count = 0;
@@ -309,6 +361,20 @@ int32_t iap_upgrade( uint8_t up_flag)
   }
 
   printf("selected fw_flag:%d\tup_file_addr:0x%X \r\n", fw_flag, up_file_addr);
+
+  if((fw_flag >= 1U) && (fw_flag <= 2U) && (upgrade.fw[fw_flag].size > 0U))
+  {
+    expect_size = upgrade.fw[fw_flag].size;
+  }
+  else
+  {
+    expect_size = upgrade.size;
+  }
+  if(expect_size == 0U)
+  {
+    iap_upgrade_state_save(0x5A, 0, 1);
+  }
+  upgrade.size = expect_size;
   
   // 擦除固件缓存区
 //  printf("erase_count:%d\tupgrade.size:%d\r\n", erase_count, upgrade.size);
@@ -316,17 +382,18 @@ int32_t iap_upgrade( uint8_t up_flag)
   // 回退功能
   if(up_flag == 0xAA)
   {
-      crc = CRC32((uint8_t *)up_file_addr, upgrade.fw[fw_flag].size);
+      crc = CRC32((uint8_t *)up_file_addr, expect_size);
       printf("AA up crc:0x%X\r\n", crc);
       
       if(crc == upgrade.fw[fw_flag].crc)
       {
 flag_0xAA:
         IWDT_Refresh();
-        erase_count = hw_flash_erase(upgrade_cfg.app_addr, upgrade.fw[fw_flag].size);
-        hw_flash_write(upgrade_cfg.app_addr, (uint8_t *)up_file_addr, upgrade.fw[fw_flag].size);
+        erase_count = flash_erase_with_wdt(upgrade_cfg.app_addr, expect_size);
+        (void)erase_count;
+        flash_write_with_wdt(upgrade_cfg.app_addr, (uint8_t *)up_file_addr, expect_size);
 
-        crc = CRC32((uint8_t *)upgrade_cfg.app_addr, upgrade.fw[fw_flag].size);
+        crc = CRC32((uint8_t *)upgrade_cfg.app_addr, expect_size);
         printf("AA app crc:0x%X\r\n", crc);
         
         if(crc == upgrade.fw[fw_flag].crc)
@@ -356,20 +423,16 @@ flag_0x3A:
   IWDT_Refresh();
   RX_FLAG = 0;
   FILE_SIZE = 0;
-  file_len = upgrade.size;
+  file_len = expect_size;
   write_offset = 0;
   read_wait_cnt = 0;
   read_retry_cnt = 0;
   qf_fd = -1;
-  erase_count = hw_flash_erase(up_file_addr, upgrade.size);
+  erase_count = flash_erase_with_wdt(up_file_addr, expect_size);
+  (void)erase_count;
 
-  LTE_SendCmdWaitResp("ATE0\r\n\0", "OK", 1000);
-  Delay_ms(500);
-  LTE_SendCmdWaitResp("AT+CFUN=1\r\n\0", "OK", 1000);
-  Delay_ms(2000);
-
-    LTE_SendCmdWaitResp("AT+CGMR\r\n\0", "OK", 1000);
-  Delay_ms(500);
+  LTE_SendCmdWaitResp("AT\r\n\0", "OK", 500);
+  LTE_SendCmdWaitResp("ATE0\r\n\0", "OK", 500);
   
   if(LTE_SendCmdWaitResp("AT+QFOPEN=\"UFS:iot_update.bin\",2\r\n\0", "+QFOPEN:", 1000) != 0)
   {
@@ -387,8 +450,8 @@ flag_0x3A:
   if(LTE_SendCmdWaitResp("AT+QFLST=\"UFS:iot_update.bin\"\r\n\0", "+QFLST:", 1000) ==0)
   {
     int32_t file_size = get_file_len((char *)uart3_rx_buf);
-    printf("QFLST file size:%ld\tupgrade size:%lu\r\n", (long)file_size, (unsigned long)upgrade.size);
-    if((file_size <= 0) || ((uint32_t)file_size != upgrade.size))
+    printf("QFLST file size:%ld\texpect size:%lu\r\n", (long)file_size, (unsigned long)expect_size);
+    if((file_size <= 0) || ((uint32_t)file_size != expect_size))
     {
       // 文件大小不一致，退出本次升级。
 //      LTE_SendCmdWaitResp("AT+QFCLOSE=1\r\n\0", "OK", 1000);
@@ -410,8 +473,8 @@ flag_0x3A:
   while(1)
   {      
     
-    if(file_len < 2048)  file_count = file_len;
-    else file_count = 2048;
+    if(file_len < LTE_READ_CHUNK_SIZE)  file_count = file_len;
+    else file_count = LTE_READ_CHUNK_SIZE;
 
     if(file_len > 0 && RX_FLAG == 0)
     {
@@ -425,7 +488,7 @@ flag_0x3A:
     {
       IWDT_Refresh();
       read_wait_cnt++;
-      if(read_wait_cnt >= 3000U) /* 3s timeout with 1ms loop delay */
+      if(read_wait_cnt >= 10000U) /* 10s timeout with 1ms loop delay */
       {
         __disable_irq();
         uart3_rx_len = 0;
@@ -457,7 +520,8 @@ flag_0x3A:
     }
     else if(RX_FLAG == 3)
     {
-      if((FILE_SIZE == 0) || (FILE_SIZE > file_count))
+      uint32_t chunk_size = FILE_SIZE;
+      if((chunk_size == 0U) || (chunk_size > file_count))
       {
         RX_FLAG = 0;
         FILE_SIZE = 0;
@@ -482,24 +546,24 @@ flag_0x3A:
         }
         continue;
       }
-      if((write_offset + FILE_SIZE) > upgrade.size)
+      if((write_offset > expect_size) || (chunk_size > (expect_size - write_offset)))
       {
         printf("write overflow offset:%lu size:%lu up:%lu\r\n",
                (unsigned long)write_offset,
-               (unsigned long)FILE_SIZE,
-               (unsigned long)upgrade.size);
+               (unsigned long)chunk_size,
+               (unsigned long)expect_size);
         iap_upgrade_state_save(0x5A, 0, 1);
       }
-      printf("flash write offset:%lu size:%lu\r\n", (unsigned long)write_offset, (unsigned long)FILE_SIZE);
-      hw_flash_write(up_file_addr + write_offset, up_file_buf, FILE_SIZE);
-      write_offset += FILE_SIZE;
+      printf("flash write offset:%lu size:%lu\r\n", (unsigned long)write_offset, (unsigned long)chunk_size);
+      flash_write_with_wdt(up_file_addr + write_offset, up_file_buf, chunk_size);
+      write_offset += chunk_size;
       /* 在成功写入后再减少剩余长度，避免在发送命令后立即把 file_len 置为0 导致提前关闭 */
       if (file_len > 0)
       {
-        if (file_len > FILE_SIZE) file_len -= FILE_SIZE;
+        if (file_len > chunk_size) file_len -= chunk_size;
         else file_len = 0;
       }
-      printf("file_len %lu\r\n", (unsigned long)(upgrade.size - file_len));
+      printf("file_len %lu\r\n\r\n", (unsigned long)(expect_size - file_len));
       read_retry_cnt = 0;
       read_wait_cnt = 0;
       RX_FLAG = 0;
@@ -511,7 +575,7 @@ flag_0x3A:
       (void)snprintf(qfclose_cmd, sizeof(qfclose_cmd), "AT+QFCLOSE=%d\r\n", (int)qf_fd);
       LTE_SendCmdWaitResp(qfclose_cmd, "OK", 300);
       Delay_ms(200);
-      crc = CRC32((uint8_t *)up_file_addr, upgrade.size);
+      crc = CRC32((uint8_t *)up_file_addr, expect_size);
       printf("up crc:0x%X\r\n", crc);
 
       if(crc == upgrade.crc)
@@ -520,16 +584,17 @@ flag_0x3A:
 
         // 文件成功更新到缓存固件区域
         upgrade.fw[fw_flag].crc = crc;
-        upgrade.fw[fw_flag].size = upgrade.size;
+        upgrade.fw[fw_flag].size = expect_size;
 
         uint8_t app_count = 0;
 
 flag_app:
         IWDT_Refresh();        
-        erase_count = hw_flash_erase(upgrade_cfg.app_addr, upgrade.size);
-        hw_flash_write(upgrade_cfg.app_addr, (uint8_t *)up_file_addr, upgrade.size);
+        erase_count = flash_erase_with_wdt(upgrade_cfg.app_addr, expect_size);
+        (void)erase_count;
+        flash_write_with_wdt(upgrade_cfg.app_addr, (uint8_t *)up_file_addr, expect_size);
 
-        crc = CRC32((uint8_t *)upgrade_cfg.app_addr, upgrade.size);
+        crc = CRC32((uint8_t *)upgrade_cfg.app_addr, expect_size);
         printf("app crc:0x%X\r\n", crc);
 
         if(crc == upgrade.crc)
@@ -537,7 +602,7 @@ flag_app:
           // 文件成功更新到app区域
           printf("app file crc ojbk!\r\n");
           upgrade.fw_flag = fw_flag;
-          upgrade.fw[fw_flag].size = upgrade.size;
+          upgrade.fw[fw_flag].size = expect_size;
           upgrade.fw[fw_flag].crc = crc;
           iap_upgrade_state_save(0x5A, 0, 1);
         }
@@ -556,7 +621,7 @@ flag_app:
         if(up_count < 5 )
         {
           up_count++;
-          file_len = upgrade.size;
+          file_len = expect_size;
           goto flag_0x3A;
         }
         else iap_upgrade_state_save(0x5A, 0, 1);
