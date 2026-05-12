@@ -326,7 +326,7 @@ static int32_t flash_write_with_wdt(uint32_t addr, const uint8_t *data, uint32_t
 
 int32_t iap_upgrade( uint8_t up_flag)
 {
-  uint32_t expect_size = 0U, file_len = 0U, file_count = LTE_READ_CHUNK_SIZE;
+  uint32_t expect_size = 0U, expect_crc = 0U, file_len = 0U, file_count = LTE_READ_CHUNK_SIZE;
   uint32_t crc, erase_count, up_file_addr = upgrade_cfg.fw1_addr; /* 默认地址 */
   uint32_t write_offset = 0;
   uint32_t read_wait_cnt = 0;
@@ -362,16 +362,23 @@ int32_t iap_upgrade( uint8_t up_flag)
 
   printf("selected fw_flag:%d\tup_file_addr:0x%X \r\n", fw_flag, up_file_addr);
 
-  if((fw_flag >= 1U) && (fw_flag <= 2U) && (upgrade.fw[fw_flag].size > 0U))
-  {
-    expect_size = upgrade.fw[fw_flag].size;
-  }
-  else
+  if(up_flag == 0x3A)
   {
     expect_size = upgrade.size;
+    expect_crc = upgrade.crc;
   }
-  if(expect_size == 0U)
+  else if((fw_flag >= 1U) && (fw_flag <= 2U) &&
+          (upgrade.fw[fw_flag].size > 0U) &&
+          (upgrade.fw[fw_flag].size != 0xFFFFFFFFU) &&
+          (upgrade.fw[fw_flag].crc != 0xFFFFFFFFU))
   {
+    expect_size = upgrade.fw[fw_flag].size;
+    expect_crc = upgrade.fw[fw_flag].crc;
+  }
+  if((expect_size == 0U) || (expect_size == 0xFFFFFFFFU) ||
+     (expect_crc == 0xFFFFFFFFU))
+  {
+    printf("expect param invalid, abort\r\n");
     iap_upgrade_state_save(0x5A, 0, 1);
   }
   upgrade.size = expect_size;
@@ -578,7 +585,7 @@ flag_0x3A:
       crc = CRC32((uint8_t *)up_file_addr, expect_size);
       printf("up crc:0x%X\r\n", crc);
 
-      if(crc == upgrade.crc)
+      if(crc == expect_crc)
       {
         printf("up file crc ojbk!\r\n");
 
@@ -597,7 +604,7 @@ flag_app:
         crc = CRC32((uint8_t *)upgrade_cfg.app_addr, expect_size);
         printf("app crc:0x%X\r\n", crc);
 
-        if(crc == upgrade.crc)
+        if(crc == expect_crc)
         {
           // 文件成功更新到app区域
           printf("app file crc ojbk!\r\n");
@@ -665,6 +672,8 @@ int main(void)
   
 	SystemInit();
 	SystemCoreClockUpdate();
+  
+  Delay_Init();
 
   // 使能SWJ口下载，禁用jtag下载。
   RCM_EnableAPB2PeriphClock(RCM_APB2_PERIPH_AFIO);

@@ -72,8 +72,6 @@ uint8_t Delay_CheckTimeout(uint32_t *start_tick, uint32_t ms)
  */
 void Delay_ms(__IO u32 nms)
 {
-    SysTick_Config(SystemCoreClock / 1000);
-
     cntMs = nms;
     while (cntMs != 0);
 }
@@ -90,8 +88,6 @@ void Delay_ms(__IO u32 nms)
  */
 void Delay_us(__IO u32 nus)
 {
-    SysTick_Config(SystemCoreClock / 1000000);
-
     cntUs = nus;
     while (cntUs != 0);
 }
