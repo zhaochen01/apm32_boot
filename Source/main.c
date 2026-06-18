@@ -109,7 +109,6 @@ int32_t get_data_len( char *pdat)
     return -1;
   }
 
-  printf("get data len -> %lu\r\n", (unsigned long)val);
   return (int32_t)val;
 }
 
@@ -293,12 +292,14 @@ static int32_t flash_erase_with_wdt(uint32_t addr, uint32_t size)
   uint32_t erase_len = flash_align_page(size);
   uint32_t offset = 0U;
 
+  FMC_Unlock();
   while(offset < erase_len)
   {
     IWDT_Refresh();
-    (void)hw_flash_erase(addr + offset, FLASH_PAGE_SIZE);
+    FMC_ErasePage(addr + offset);
     offset += FLASH_PAGE_SIZE;
   }
+  FMC_Lock();
   IWDT_Refresh();
   return 0;
 }
@@ -323,6 +324,22 @@ static int32_t flash_write_with_wdt(uint32_t addr, const uint8_t *data, uint32_t
   return 0;
 }
 
+static void lte_qfread_recover_wait_with_wdt(uint32_t wait_ms)
+{
+  uint32_t wait_cnt = 0U;
+
+  /* 4G 模块在 QFREAD 异常后可能仍在发送本次原始数据，等待其回到 AT 态 */
+  for(wait_cnt = 0U; wait_cnt < wait_ms; wait_cnt++)
+  {
+    IWDT_Refresh();
+    LTE_ResetReadState();
+    Delay_ms(1);
+  }
+
+  LTE_ResetReadState();
+  IWDT_Refresh();
+}
+
 
 int32_t iap_upgrade( uint8_t up_flag)
 {
@@ -330,7 +347,8 @@ int32_t iap_upgrade( uint8_t up_flag)
   uint32_t crc, erase_count, up_file_addr = upgrade_cfg.fw1_addr; /* 默认地址 */
   uint32_t write_offset = 0;
   uint32_t read_wait_cnt = 0;
-  uint8_t read_retry_cnt = 0;
+  uint32_t diag_recv = 0U, diag_expect = 0U, diag_ovre = 0U, diag_fe = 0U, diag_ne = 0U;
+  uint8_t rx_fault = 0U;
   int32_t qf_fd = -1;
   char qfread_cmd[40];
   char qfclose_cmd[24];
@@ -428,12 +446,15 @@ flag_0xAA:
   
 flag_0x3A:
   IWDT_Refresh();
-  RX_FLAG = 0;
-  FILE_SIZE = 0;
+  if(qf_fd >= 0)
+  {
+    (void)snprintf(qfclose_cmd, sizeof(qfclose_cmd), "AT+QFCLOSE=%d\r\n", (int)qf_fd);
+    LTE_SendCmdWaitResp(qfclose_cmd, "OK", 300);
+  }
+  LTE_ResetReadState();
   file_len = expect_size;
   write_offset = 0;
   read_wait_cnt = 0;
-  read_retry_cnt = 0;
   qf_fd = -1;
   erase_count = flash_erase_with_wdt(up_file_addr, expect_size);
   (void)erase_count;
@@ -460,12 +481,9 @@ flag_0x3A:
     printf("QFLST file size:%ld\texpect size:%lu\r\n", (long)file_size, (unsigned long)expect_size);
     if((file_size <= 0) || ((uint32_t)file_size != expect_size))
     {
-      // 文件大小不一致，退出本次升级。
-//      LTE_SendCmdWaitResp("AT+QFCLOSE=1\r\n\0", "OK", 1000);
-//      Delay_ms(200);
-//      goto flag_0x3A;
+      (void)snprintf(qfclose_cmd, sizeof(qfclose_cmd), "AT+QFCLOSE=%d\r\n", (int)qf_fd);
+      LTE_SendCmdWaitResp(qfclose_cmd, "OK", 300);
       iap_upgrade_state_save(0x5A, 0, 1);
-//    NVIC_SystemReset();
     }
     else
     {
@@ -474,11 +492,34 @@ flag_0x3A:
   }
   else
   {
+    (void)snprintf(qfclose_cmd, sizeof(qfclose_cmd), "AT+QFCLOSE=%d\r\n", (int)qf_fd);
+    LTE_SendCmdWaitResp(qfclose_cmd, "OK", 300);
     iap_upgrade_state_save(0x5A, 0, 1);
   }
   
   while(1)
-  {      
+  {
+    rx_fault = LTE_TakeRxFaultSnapshot(&diag_recv, &diag_expect, &diag_ovre, &diag_fe, &diag_ne);
+    if(rx_fault != 0U)
+    {
+      if(up_count < 5U)
+      {
+        up_count++;
+        printf("uart rx fault, restart file:%d recv:%lu expect:%lu ovre:%lu fe:%lu ne:%lu\r\n",
+               up_count,
+               (unsigned long)diag_recv,
+               (unsigned long)diag_expect,
+               (unsigned long)diag_ovre,
+               (unsigned long)diag_fe,
+               (unsigned long)diag_ne);
+        lte_qfread_recover_wait_with_wdt(5000U);
+        goto flag_0x3A;
+      }
+      else
+      {
+        iap_upgrade_state_save(0x5A, 0, 1);
+      }
+    }
     
     if(file_len < LTE_READ_CHUNK_SIZE)  file_count = file_len;
     else file_count = LTE_READ_CHUNK_SIZE;
@@ -497,30 +538,28 @@ flag_0x3A:
       read_wait_cnt++;
       if(read_wait_cnt >= 10000U) /* 10s timeout with 1ms loop delay */
       {
-        __disable_irq();
-        uart3_rx_len = 0;
-        memset(uart3_rx_buf, 0, UART3_RX_BUF_SIZE);
-        __enable_irq();
-        RX_FLAG = 0;
-        FILE_SIZE = 0;
-        read_wait_cnt = 0;
-        if(read_retry_cnt < 3)
+        if(LTE_TakeRxFaultSnapshot(&diag_recv, &diag_expect, &diag_ovre, &diag_fe, &diag_ne) == 0U)
         {
-          read_retry_cnt++;
-          printf("QFREAD timeout, retry chunk:%d\r\n", read_retry_cnt);
+          LTE_GetRxDiagSnapshot(&diag_recv, &diag_expect, &diag_ovre, &diag_fe, &diag_ne);
+        }
+        LTE_ResetReadState();
+        read_wait_cnt = 0;
+        if(up_count < 5U)
+        {
+          up_count++;
+          printf("QFREAD timeout, restart file:%d recv:%lu expect:%lu ovre:%lu fe:%lu ne:%lu\r\n",
+                 up_count,
+                 (unsigned long)diag_recv,
+                 (unsigned long)diag_expect,
+                 (unsigned long)diag_ovre,
+                 (unsigned long)diag_fe,
+                 (unsigned long)diag_ne);
+          lte_qfread_recover_wait_with_wdt(5000U);
+          goto flag_0x3A;
         }
         else
         {
-          if(up_count < 5)
-          {
-            up_count++;
-            printf("QFREAD timeout, restart file:%d\r\n", up_count);
-            goto flag_0x3A;
-          }
-          else
-          {
-            iap_upgrade_state_save(0x5A, 0, 1);
-          }
+          iap_upgrade_state_save(0x5A, 0, 1);
         }
       }
       Delay_ms(1);
@@ -530,26 +569,29 @@ flag_0x3A:
       uint32_t chunk_size = FILE_SIZE;
       if((chunk_size == 0U) || (chunk_size > file_count))
       {
-        RX_FLAG = 0;
-        FILE_SIZE = 0;
-        read_wait_cnt = 0;
-        if(read_retry_cnt < 3)
+        if(LTE_TakeRxFaultSnapshot(&diag_recv, &diag_expect, &diag_ovre, &diag_fe, &diag_ne) == 0U)
         {
-          read_retry_cnt++;
-          printf("QFREAD size error, retry chunk:%d\r\n", read_retry_cnt);
+          LTE_GetRxDiagSnapshot(&diag_recv, &diag_expect, &diag_ovre, &diag_fe, &diag_ne);
+        }
+        LTE_ResetReadState();
+        read_wait_cnt = 0;
+        if(up_count < 5U)
+        {
+          up_count++;
+          printf("QFREAD size error, restart file:%d chunk:%lu recv:%lu expect:%lu ovre:%lu fe:%lu ne:%lu\r\n",
+                 up_count,
+                 (unsigned long)chunk_size,
+                 (unsigned long)diag_recv,
+                 (unsigned long)diag_expect,
+                 (unsigned long)diag_ovre,
+                 (unsigned long)diag_fe,
+                 (unsigned long)diag_ne);
+          lte_qfread_recover_wait_with_wdt(5000U);
+          goto flag_0x3A;
         }
         else
         {
-          if(up_count < 5)
-          {
-            up_count++;
-            printf("QFREAD size error, restart file:%d\r\n", up_count);
-            goto flag_0x3A;
-          }
-          else
-          {
-            iap_upgrade_state_save(0x5A, 0, 1);
-          }
+          iap_upgrade_state_save(0x5A, 0, 1);
         }
         continue;
       }
@@ -571,7 +613,6 @@ flag_0x3A:
         else file_len = 0;
       }
       printf("file_len %lu\r\n\r\n", (unsigned long)(expect_size - file_len));
-      read_retry_cnt = 0;
       read_wait_cnt = 0;
       RX_FLAG = 0;
       FILE_SIZE = 0;
@@ -662,14 +703,9 @@ flag_app:
  */
 int main(void)
 {
-  static uint16_t i = 0, flag = 0, erase_count = 0;
-  
   int32_t req = -1;
-  
-  uint32_t file_len = 0, file_count = 2048;
-  uint32_t crc;
-  
-  
+
+
 	SystemInit();
 	SystemCoreClockUpdate();
   

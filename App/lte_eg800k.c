@@ -22,19 +22,132 @@ volatile uint32_t FILE_SIZE = 0;
 
 uint8_t up_file_buf[LTE_READ_CHUNK_SIZE];
 
+/* USART3_Isr 内部状态变量，在 eg800k_init 中清零 */
+static uint16_t uart3_isr_idx = 0;
+static uint32_t uart3_isr_len = 0;
+static uint32_t uart3_isr_rx2_count = 0;
+static volatile uint8_t uart3_rx_fault_flag = 0U;
+static volatile uint32_t uart3_rx_fault_recv_len = 0U;
+static volatile uint32_t uart3_rx_fault_expect_len = 0U;
+static volatile uint32_t uart3_ovre_cnt = 0U;
+static volatile uint32_t uart3_fe_cnt = 0U;
+static volatile uint32_t uart3_ne_cnt = 0U;
+
 
 
 
 extern int32_t get_data_len( char *pdat);
 extern int32_t get_file_len(char *pdat);
 
+static void uart3_reset_read_state_local(void)
+{
+  RX_FLAG = 0U;
+  FILE_SIZE = 0U;
+  uart3_rx_len = 0U;
+  uart3_isr_idx = 0U;
+  uart3_isr_len = 0U;
+  uart3_isr_rx2_count = 0U;
+  memset(uart3_rx_buf, 0, sizeof(uart3_rx_buf));
+}
+
+static void uart3_mark_rx_fault_and_reset(void)
+{
+  uart3_rx_fault_flag = 1U;
+  uart3_rx_fault_recv_len = uart3_isr_rx2_count;
+  uart3_rx_fault_expect_len = uart3_isr_len;
+  uart3_reset_read_state_local();
+}
+
+void LTE_ResetReadState(void)
+{
+  __disable_irq();
+  uart3_reset_read_state_local();
+  __enable_irq();
+}
+
+uint8_t LTE_TakeRxFaultSnapshot(uint32_t *received_len, uint32_t *expect_len,
+                                uint32_t *ovre_cnt, uint32_t *fe_cnt, uint32_t *ne_cnt)
+{
+  uint8_t fault_flag = 0U;
+
+  __disable_irq();
+  fault_flag = uart3_rx_fault_flag;
+  if(received_len != NULL)
+  {
+    *received_len = uart3_rx_fault_recv_len;
+  }
+  if(expect_len != NULL)
+  {
+    *expect_len = uart3_rx_fault_expect_len;
+  }
+  if(ovre_cnt != NULL)
+  {
+    *ovre_cnt = uart3_ovre_cnt;
+  }
+  if(fe_cnt != NULL)
+  {
+    *fe_cnt = uart3_fe_cnt;
+  }
+  if(ne_cnt != NULL)
+  {
+    *ne_cnt = uart3_ne_cnt;
+  }
+  uart3_rx_fault_flag = 0U;
+  __enable_irq();
+
+  return fault_flag;
+}
+
+void LTE_GetRxDiagSnapshot(uint32_t *received_len, uint32_t *expect_len,
+                           uint32_t *ovre_cnt, uint32_t *fe_cnt, uint32_t *ne_cnt)
+{
+  __disable_irq();
+  if(received_len != NULL)
+  {
+    *received_len = uart3_isr_rx2_count;
+  }
+  if(expect_len != NULL)
+  {
+    *expect_len = uart3_isr_len;
+  }
+  if(ovre_cnt != NULL)
+  {
+    *ovre_cnt = uart3_ovre_cnt;
+  }
+  if(fe_cnt != NULL)
+  {
+    *fe_cnt = uart3_fe_cnt;
+  }
+  if(ne_cnt != NULL)
+  {
+    *ne_cnt = uart3_ne_cnt;
+  }
+  __enable_irq();
+}
+
 void eg800k_init(void)
 {
       // 初始化4G模块控制GPIO
   hw_gpio_init(Hw_IoT_Cfg);                 // 配置GPIO引脚
   
+  /* 清零 ISR 状态变量，防止模块异常复位后残留 */
+  uart3_isr_idx = 0;
+  uart3_isr_len = 0;
+  uart3_isr_rx2_count = 0;
+  uart3_rx_fault_flag = 0U;
+  uart3_rx_fault_recv_len = 0U;
+  uart3_rx_fault_expect_len = 0U;
+  uart3_ovre_cnt = 0U;
+  uart3_fe_cnt = 0U;
+  uart3_ne_cnt = 0U;
+  uart3_rx_len = 0U;
+  RX_FLAG = 0U;
+  FILE_SIZE = 0U;
+  memset(uart3_rx_buf, 0, sizeof(uart3_rx_buf));
+  
   USART_ClearIntFlag(USART3, USART_INT_RXBNE); 
   USART_EnableInterrupt(USART3, USART_INT_RXBNE);  // 使能接收缓冲区非空中断
+  USART_EnableInterrupt(USART3, USART_INT_ERR);
   
 //  USART_EnableInterrupt(USART3, USART_INT_IDLE);
   
@@ -45,9 +158,14 @@ void eg800k_init(void)
   Delay_ms(500);
   Hw_IoT_Cfg.port->BC = Hw_IoT_Cfg.pin;    // 拉高4G模块控制引脚，使能模块
   
-  CheckResp_loop("RDY",3000); 
-  
-  printf("eg800k init successful!\r\n");
+  if(CheckResp_loop("RDY",3000) != 0)
+  {
+    printf("eg800k init failed: no RDY!\r\n");
+  }
+  else
+  {
+    printf("eg800k init successful!\r\n");
+  }
 }
 
 
@@ -153,6 +271,7 @@ int32_t LTE_SendCmdWaitResp(char *cmd, char *target_resp, uint32_t timeout_ms)
       /* 原子性拷贝接收缓冲到本地，避免中断竞争 */
       char local_buf[UART3_RX_BUF_SIZE + 1];
       uint32_t copy_len = 0;
+      size_t tr_len = strlen(target_resp); /* 缓存，避免循环内重复计算 */
       __disable_irq();
       copy_len = uart3_rx_len;
       if (copy_len > UART3_RX_BUF_SIZE) copy_len = UART3_RX_BUF_SIZE;
@@ -178,7 +297,6 @@ int32_t LTE_SendCmdWaitResp(char *cmd, char *target_resp, uint32_t timeout_ms)
           while (linelen > 0 && (*p == ' ' || *p == '\t')) { p++; linelen--; }
 
           /* 简单匹配策略：前缀匹配或包含匹配都视为命中 */
-          size_t tr_len = strlen(target_resp);
           if (linelen >= tr_len && strncmp(p, target_resp, tr_len) == 0)
           {
             return 0; /* 前缀匹配 */
@@ -215,9 +333,32 @@ int32_t LTE_SendCmdWaitResp(char *cmd, char *target_resp, uint32_t timeout_ms)
 void USART3_Isr(void)
 {
   uint8_t dat = 0;
-  static uint16_t i = 0;
-  static uint32_t len = 0;
-  static uint32_t rx2_count = 0; /* 专用于 RX_FLAG==2 的计数器 */
+  uint8_t ovre_flag = USART_ReadStatusFlag(USART3, USART_FLAG_OVRE);
+  uint8_t fe_flag = USART_ReadStatusFlag(USART3, USART_FLAG_FE);
+  uint8_t ne_flag = USART_ReadStatusFlag(USART3, USART_FLAG_NE);
+
+  if((ovre_flag != RESET) || (fe_flag != RESET) || (ne_flag != RESET))
+  {
+    volatile uint32_t usart_sts = USART3->STS;
+    volatile uint32_t usart_dat = USART3->DATA;
+    (void)usart_sts;
+    (void)usart_dat;
+
+    if(ovre_flag != RESET)
+    {
+      uart3_ovre_cnt++;
+    }
+    if(fe_flag != RESET)
+    {
+      uart3_fe_cnt++;
+    }
+    if(ne_flag != RESET)
+    {
+      uart3_ne_cnt++;
+    }
+    uart3_mark_rx_fault_and_reset();
+    return;
+  }
 
     // 检查接收缓冲区非空中断标志
   if(USART_ReadIntFlag(USART3, USART_INT_RXBNE))
@@ -228,95 +369,78 @@ void USART3_Isr(void)
     {
       /* 避免把LTE原始数据透传到调试串口，防止与printf日志串扰 */
       // uart_send_data(USART1, &dat, 1);
-      i %= UART3_RX_BUF_SIZE;
-      uart3_rx_buf[i++] = dat;                     // 存储到缓冲区并递增索引
+      uart3_isr_idx %= UART3_RX_BUF_SIZE;
+      uart3_rx_buf[uart3_isr_idx++] = dat;                     // 存储到缓冲区并递增索引
 
       /* 检查数据包结束条件：换行符（且缓冲区有数据）—— 仅在普通模式下 */
-      if (i >= 2 && uart3_rx_buf[i-2] == '\r' && uart3_rx_buf[i-1] == '\n')
+      if (uart3_isr_idx >= 2 && uart3_rx_buf[uart3_isr_idx-2] == '\r' && uart3_rx_buf[uart3_isr_idx-1] == '\n')
       {
-        uart3_rx_buf[i] = '\0';
-        uart3_rx_len = i + 1;
+        uart3_rx_buf[uart3_isr_idx] = '\0';
+        uart3_rx_len = uart3_isr_idx + 1;
 
         if (RX_FLAG == 1)
         {
           if(strstr((char *)uart3_rx_buf, "CONNECT ") != NULL)
           {
-            len = get_data_len((char *)uart3_rx_buf);
-            if(len != -1)
+            uart3_isr_len = get_data_len((char *)uart3_rx_buf);
+            if(uart3_isr_len != -1)
             {
-              FILE_SIZE = len;
-              if ((len > 0U) && (len <= sizeof(up_file_buf)))
+              FILE_SIZE = uart3_isr_len;
+              if ((uart3_isr_len > 0U) && (uart3_isr_len <= sizeof(up_file_buf)))
               {
                 /* 进入长度接收模式：使用独立计数器，不再使用 i 作为计数 */
                 RX_FLAG = 2;
-                rx2_count = 0;
-                /* 如果 len 为0或过大，可选择默认2048保护 (保持原行为) */
-           //     if (len == 0) len = 2048;
+                uart3_isr_rx2_count = 0;
               }
               else
               {
-                RX_FLAG = 0;
-                FILE_SIZE = 0;
-                len = 0;
-                rx2_count = 0;
+                uart3_mark_rx_fault_and_reset();
               }
             }
             else
             {
-              RX_FLAG = 0;
-              FILE_SIZE = 0;
-              len = 0;
-              rx2_count = 0;
+              uart3_mark_rx_fault_and_reset();
             }
           }
           /* RX_FLAG==1 且非 CONNECT 行时，继续等待，不改变状态 */
         }
-        i = 0;                              // 重置普通缓冲区索引
+        uart3_isr_idx = 0;                              // 重置普通缓冲区索引
       }
-      else if ((dat == '\r' || dat == '\n') && i == 1) // 处理单独的\r或\n（空行，直接清空）
+      else if ((dat == '\r' || dat == '\n') && uart3_isr_idx == 1) // 处理单独的\r或\n（空行，直接清空）
       {
-        i = 0;
+        uart3_isr_idx = 0;
       }
       else if (dat == '>')
       {
-        i = 0;
+        uart3_isr_idx = 0;
       }
     }
     else /* RX_FLAG == 2：长度接收模式，使用 rx2_count 统计接收字节数 */
     {
-      if((len == 0U) || (len > sizeof(up_file_buf)))
+      if((uart3_isr_len == 0U) || (uart3_isr_len > sizeof(up_file_buf)))
       {
-        RX_FLAG = 0;
-        FILE_SIZE = 0;
-        len = 0;
-        rx2_count = 0;
+        uart3_mark_rx_fault_and_reset();
         return;
       }
 
       /* 增加接收计数（每接收一个字节） */
-      if(rx2_count < len)
+      if(uart3_isr_rx2_count < uart3_isr_len)
       {
-        up_file_buf[rx2_count++] = dat;
+        up_file_buf[uart3_isr_rx2_count++] = dat;
       }
       else
       {
-        RX_FLAG = 0;
-        FILE_SIZE = 0;
-        len = 0;
-        rx2_count = 0;
+        uart3_mark_rx_fault_and_reset();
         return;
       }
-//      i %= 2048;
       /* 可选：把数据存入专用缓冲，或由上层直接读取串口 DMA 缓冲；这里仅计数 */
-      if (rx2_count >= len)
+      if (uart3_isr_rx2_count >= uart3_isr_len)
       {
         /* 完成 */
         RX_FLAG = 3;
-        rx2_count = 0;
-        len = 0;
+        uart3_isr_rx2_count = 0;
+        uart3_isr_len = 0;
       }
-      /* 调试信息，避免频繁打印 */
-      // if (rx2_count == 2048) printf("RX_FLAG:%d\trx2_count:%lu\r\n", RX_FLAG, (unsigned long)rx2_count);
     }
   }
 

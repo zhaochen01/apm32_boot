@@ -29,6 +29,11 @@ extern uint8_t get_uart3_flag(void);
 extern int32_t CheckResp(char *target_resp);
 extern int32_t CheckResp_loop(char *target_resp, uint32_t delay_ms);
 extern int32_t LTE_SendCmdWaitResp(char *cmd, char *target_resp, uint32_t timeout_ms);
+extern void LTE_ResetReadState(void);
+extern uint8_t LTE_TakeRxFaultSnapshot(uint32_t *received_len, uint32_t *expect_len,
+                                       uint32_t *ovre_cnt, uint32_t *fe_cnt, uint32_t *ne_cnt);
+extern void LTE_GetRxDiagSnapshot(uint32_t *received_len, uint32_t *expect_len,
+                                  uint32_t *ovre_cnt, uint32_t *fe_cnt, uint32_t *ne_cnt);
 
 
 

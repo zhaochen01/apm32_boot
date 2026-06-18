@@ -162,8 +162,12 @@ uint32_t uart_send_data(USART_T *usart, void *pdata, uint32_t len)
  */
 void USART1_Isr(void)
 {
-  
-  
+  /* 异常触发时清标志，避免死循环 */
+  if(USART_ReadIntFlag(USART1, USART_INT_RXBNE))
+  {
+    (void)USART_RxData(USART1);
+  }
+  USART_ClearIntFlag(USART1, USART_INT_RXBNE);
 }
 
 

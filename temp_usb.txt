@@ -1,0 +1,12 @@
+﻿py :   File "<string>", line 17
+所在位置 行:1 字符: 5
++ & { py -c "
++     ~~~~~~~
+    + CategoryInfo          : NotSpecified: (  File "<string>", line 17:String 
+   ) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    if text and ('AT+QCFG=" usbnet\'
+                 ^
+SyntaxError: unterminated string literal (detected at line 17); perhaps you esc
+aped the end quote?
