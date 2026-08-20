@@ -6,34 +6,34 @@
 #define UPGRADE_ADDR       0x807E000
 #define UPGRADE_CFG_ADDR   0x807E800
 #define APP_ADDR           0x8006000
-#define UP_FILE_ADDR_1     0x8020000
-#define UP_FILE_ADDR_2     0x8040000
+#define UP_FILE_ADDR_1     0x802A000   /* 0x6000 + 144KB (0x24000) */
+#define UP_FILE_ADDR_2     0x804E000   /* 0x2A000 + 144KB (0x24000) */
 
 
 
 typedef struct
   {
-  uint32_t    size;           // 文件大小
-  uint32_t    crc;            // 文件crc校验值
+  uint32_t    size;           // 锟侥硷拷锟斤拷小
+  uint32_t    crc;            // 锟侥硷拷crc校锟斤拷值
 } Firmware;
 
 
 // UPGRADE
-#pragma pack(push, 1) // push保存当前对齐设置，1表示按1字节对齐 __packed  
+#pragma pack(push, 1) // push锟斤拷锟芥当前锟斤拷锟斤拷锟斤拷锟矫ｏ拷1锟斤拷示锟斤拷1锟街节讹拷锟斤拷 __packed  
 typedef struct
   {
-  uint8_t     flag;           // 5A:可用标志
-  uint8_t     up_count;       // 升级次数计数
-  uint8_t     fw_flag;        // 固件标志，指示固件的标识
-  uint8_t     status;         // 固件状态
-  uint32_t    size;           // 文件大小
-  uint32_t    crc;            // 文件crc校验值
-  char        url[128];       // 下载地址
-  char        name[64];       // 文件名称
-  Firmware    fw[3];          // 文件校验信息 0：app 1：固件1  2：固件2
-//  uint32_t data_crc;            // 本结构体数据的crc校验值
+  uint8_t     flag;           // 5A:锟斤拷锟矫憋拷志
+  uint8_t     up_count;       // 锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷锟斤拷
+  uint8_t     fw_flag;        // 锟教硷拷锟斤拷志锟斤拷指示锟教硷拷锟侥憋拷识
+  uint8_t     status;         // 锟教硷拷状态
+  uint32_t    size;           // 锟侥硷拷锟斤拷小
+  uint32_t    crc;            // 锟侥硷拷crc校锟斤拷值
+  char        url[128];       // 锟斤拷锟截碉拷址
+  char        name[64];       // 锟侥硷拷锟斤拷锟斤拷
+  Firmware    fw[3];          // 锟侥硷拷校锟斤拷锟斤拷息 0锟斤拷app 1锟斤拷锟教硷拷1  2锟斤拷锟教硷拷2
+//  uint32_t data_crc;            // 锟斤拷锟结构锟斤拷锟斤拷锟捷碉拷crc校锟斤拷值
 }Upgrade_t;
-#pragma pack(pop)     // 恢复之前的对齐设置
+#pragma pack(pop)     // 锟街革拷之前锟侥讹拷锟斤拷锟斤拷锟斤拷
 
 
 typedef struct
@@ -42,7 +42,7 @@ typedef struct
   uint32_t app_addr;
   uint32_t fw1_addr;
   uint32_t fw2_addr;
-  uint32_t data_crc;            // 本结构体数据的crc校验值
+  uint32_t data_crc;            // 锟斤拷锟结构锟斤拷锟斤拷锟捷碉拷crc校锟斤拷值
 }Upgrade_cfg_t;
 
 

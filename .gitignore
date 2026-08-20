@@ -19,3 +19,6 @@ BrowseInfo/
 List*/
 Obj*/
 
+
+# build log
+MDK/build.log

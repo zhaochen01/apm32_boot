@@ -28,7 +28,7 @@
 
 #include "bsp_delay.h"
 #include "hw_uart.h"
-#include "lte_eg800k.h"
+#include "upgrade_ctrl.h"
 
 #include "apm32e10x_iwdt.h"
 
@@ -44,7 +44,7 @@ uint8_t count = 0;
 
 
 
-// WDT ¿´ÃÅ¹· 
+// WDT ï¿½ï¿½ï¿½Å¹ï¿½ 
 HW_GPIO_INIT_T Hw_WDT_Cfg = { RCM_APB2_PERIPH_GPIOB, GPIOB, GPIO_PIN_0, GPIO_SPEED_10MHz, GPIO_MODE_OUT_PP };
 
 HW_GPIO_INIT_T Hw_RUN_Cfg = { RCM_APB2_PERIPH_GPIOC, GPIOC, GPIO_PIN_6, GPIO_SPEED_10MHz, GPIO_MODE_OUT_PP };
@@ -76,119 +76,6 @@ void hw_gpio_init( HW_GPIO_INIT_T gpio_cfg)
 
 
 
-
-int32_t get_data_len( char *pdat)
-{
-  uint32_t val = 0U;
-  const char *prefix = "CONNECT ";
-  char *p = NULL;
-
-  if(pdat == NULL)
-  {
-    return -1;
-  }
-
-  /* ÐÐÄÚËÑË÷ CONNECT£¬ÈÝÈÌÇ°µ¼ÔëÉù/²ÐÁôCRLF */
-  p = strstr(pdat, prefix);
-  if(p == NULL) return -1;
-  p += strlen(prefix);
-
-  if((*p < '0') || (*p > '9'))
-  {
-    return -1;
-  }
-
-  while((*p >= '0') && (*p <= '9'))
-  {
-    val = (val * 10U) + (uint32_t)(*p - '0');
-    p++;
-  }
-
-  if((val == 0U) || (val > LTE_READ_CHUNK_SIZE))
-  {
-    return -1;
-  }
-
-  return (int32_t)val;
-}
-
-
-int32_t get_file_len(char *pdat)
-{
-  uint32_t val = 0U;
-  char *p = NULL;
-
-  if(pdat == NULL)
-  {
-    return -1;
-  }
-
-  /* µäÐÍ¸ñÊ½£º+QFLST: "UFS:iot_update.bin",89584 */
-  p = strrchr(pdat, ',');
-  if((p == NULL) || (*(p + 1) < '0') || (*(p + 1) > '9'))
-  {
-    printf("get file len error!\r\n");
-    return -1;
-  }
-
-  p++;
-  while((*p >= '0') && (*p <= '9'))
-  {
-    uint32_t prev = val;
-    val = (val * 10U) + (uint32_t)(*p - '0');
-    if(val < prev) /* overflow guard */
-    {
-      printf("get file len overflow!\r\n");
-      return -1;
-    }
-    p++;
-  }
-
-  if(val > 0U)
-  {
-    printf("up file size %lu\r\n", (unsigned long)val);
-    return (int32_t)val;
-  }
-
-  printf("get file len error!\r\n");
-  return -1;
-}
-
-int32_t get_qfopen_fd(char *pdat)
-{
-  int32_t fd = 0;
-  char *p = NULL;
-
-  if(pdat == NULL)
-  {
-    return -1;
-  }
-
-  p = strstr(pdat, "+QFOPEN:");
-  if(p != NULL)
-  {
-    p = strchr(p, ':');
-    if(p != NULL)
-    {
-      p++;
-      while((*p == ' ') || (*p == '\t')) p++;
-      if((*p >= '0') && (*p <= '9'))
-      {
-        fd = 0;
-        while((*p >= '0') && (*p <= '9'))
-        {
-          fd = (fd * 10) + (*p - '0');
-          p++;
-        }
-        printf("QFOPEN fd:%d\r\n", fd);
-        return fd;
-      }
-    }
-  }
-
-  printf("get qfopen fd error!\r\n");
-  return -1;
-}
 
 /*!
  * @brief   This function handles TMR1 Update Handler
@@ -228,8 +115,8 @@ void TMR5_IRQHandler(void)
 
 
 /**
- * @brief  TIM5³õÊ¼»¯£¨500ms¶¨Ê±ÖÐ¶Ï£¬ÊÊÅä36MHzÖ÷Æµ£©
- * @retval ÎÞ
+ * @brief  TIM5ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½ï¿½500msï¿½ï¿½Ê±ï¿½Ð¶Ï£ï¿½ï¿½ï¿½ï¿½ï¿½36MHzï¿½ï¿½Æµï¿½ï¿½
+ * @retval ï¿½ï¿½
  */
 void TIM5_Init_500ms_Interrupt(void)
 {
@@ -239,11 +126,11 @@ void TIM5_Init_500ms_Interrupt(void)
 
     TMR_Reset(TMR5);
   
-    TMR_BaseConfigStruct.clockDivision = TMR_CLOCK_DIV_1;        // ²ÉÑù·ÖÆµ1£¨Í¨ÓÃ¶¨Ê±Æ÷Ä¬ÈÏÖµ£¬ÒÆ³ýÈßÓàµÄDIV4£©
-    TMR_BaseConfigStruct.countMode = TMR_COUNTER_MODE_UP;        // ÏòÉÏ¼ÆÊýÄ£Ê½
-    // Ô¤·ÖÆµ£º36MHz / (35999 + 1) = 1000Hz£¨1ms/¼ÆÊý£©
+    TMR_BaseConfigStruct.clockDivision = TMR_CLOCK_DIV_1;        // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Æµ1ï¿½ï¿½Í¨ï¿½Ã¶ï¿½Ê±ï¿½ï¿½Ä¬ï¿½ï¿½Öµï¿½ï¿½ï¿½Æ³ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½DIV4ï¿½ï¿½
+    TMR_BaseConfigStruct.countMode = TMR_COUNTER_MODE_UP;        // ï¿½ï¿½ï¿½Ï¼ï¿½ï¿½ï¿½Ä£Ê½
+    // Ô¤ï¿½ï¿½Æµï¿½ï¿½36MHz / (35999 + 1) = 1000Hzï¿½ï¿½1ms/ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     TMR_BaseConfigStruct.division = 35999;                      
-    // ×Ô¶¯ÖØ×°£º1000Hz ¡Á 500ms = 500´Î ¡ú 499£¨500-1£©
+    // ï¿½Ô¶ï¿½ï¿½ï¿½×°ï¿½ï¿½1000Hz ï¿½ï¿½ 500ms = 500ï¿½ï¿½ ï¿½ï¿½ 499ï¿½ï¿½500-1ï¿½ï¿½
     TMR_BaseConfigStruct.period = 499; 
     TMR_BaseConfigStruct.repetitionCounter = 0;
     TMR_ConfigTimeBase(TMR5, &TMR_BaseConfigStruct);
@@ -257,436 +144,30 @@ void TIM5_Init_500ms_Interrupt(void)
 
 
 /**
- * @brief  ÖðÎ»¼ÆËãCRC32£¨±ê×¼IEEE 802.3¶àÏîÊ½£º0xEDB88320£©
- * @param  data: ÊäÈëÊý¾Ý»º³åÇø
- * @param  length: Êý¾Ý³¤¶È£¨×Ö½ÚÊý£©
- * @retval ×îÖÕµÄCRC32Öµ£¨È¡·´ºó£©
+ * @brief  ï¿½ï¿½Î»ï¿½ï¿½ï¿½ï¿½CRC32ï¿½ï¿½ï¿½ï¿½×¼IEEE 802.3ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½0xEDB88320ï¿½ï¿½
+ * @param  data: ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ý»ï¿½ï¿½ï¿½ï¿½ï¿½
+ * @param  length: ï¿½ï¿½ï¿½Ý³ï¿½ï¿½È£ï¿½ï¿½Ö½ï¿½ï¿½ï¿½ï¿½ï¿½
+ * @retval ï¿½ï¿½ï¿½Õµï¿½CRC32Öµï¿½ï¿½È¡ï¿½ï¿½ï¿½ï¿½
  */
 uint32_t CRC32(uint8_t *data, uint32_t length)
 {
-    uint32_t crc = 0xFFFFFFFF; // ³õÊ¼Öµ
-    uint32_t poly = 0xEDB88320; // ±ê×¼CRC32¶àÏîÊ½£¨·´Ïò£©
+    uint32_t crc = 0xFFFFFFFF; // ï¿½ï¿½Ê¼Öµ
+    uint32_t poly = 0xEDB88320; // ï¿½ï¿½×¼CRC32ï¿½ï¿½ï¿½ï¿½Ê½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 
     for (uint32_t i = 0; i < length; i++)
     {
-        // µ±Ç°×Ö½ÚÓëCRCµÍ8Î»Òì»ò
+        // ï¿½ï¿½Ç°ï¿½Ö½ï¿½ï¿½ï¿½CRCï¿½ï¿½8Î»ï¿½ï¿½ï¿½
         crc ^= data[i];
-        // ÖðÎ»´¦Àí£¨8Î»£©
+        // ï¿½ï¿½Î»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½8Î»ï¿½ï¿½
         for (uint8_t j = 0; j < 8; j++)
         {
-            // ÓÒÒÆ£¬×îµÍÎ»Îª1ÔòÒì»ò¶àÏîÊ½
+            // ï¿½ï¿½ï¿½Æ£ï¿½ï¿½ï¿½ï¿½Î»Îª1ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê½
             crc = (crc >> 1) ^ ((crc & 0x01) ? poly : 0);
         }
     }
-    // ×îÖÕ½á¹ûÈ¡·´
+    // ï¿½ï¿½ï¿½Õ½ï¿½ï¿½È¡ï¿½ï¿½
     return ~crc;
 }
-
-static uint32_t flash_align_page(uint32_t size)
-{
-  return (size + FLASH_PAGE_SIZE - 1U) & (~(FLASH_PAGE_SIZE - 1U));
-}
-
-static int32_t flash_erase_with_wdt(uint32_t addr, uint32_t size)
-{
-  uint32_t erase_len = flash_align_page(size);
-  uint32_t offset = 0U;
-
-  FMC_Unlock();
-  while(offset < erase_len)
-  {
-    IWDT_Refresh();
-    FMC_ErasePage(addr + offset);
-    offset += FLASH_PAGE_SIZE;
-  }
-  FMC_Lock();
-  IWDT_Refresh();
-  return 0;
-}
-
-static int32_t flash_write_with_wdt(uint32_t addr, const uint8_t *data, uint32_t size)
-{
-  uint32_t offset = 0U;
-  uint32_t chunk = 0U;
-
-  while(offset < size)
-  {
-    chunk = size - offset;
-    if(chunk > FLASH_PAGE_SIZE)
-    {
-      chunk = FLASH_PAGE_SIZE;
-    }
-    IWDT_Refresh();
-    (void)hw_flash_write(addr + offset, data + offset, chunk);
-    offset += chunk;
-  }
-  IWDT_Refresh();
-  return 0;
-}
-
-static void lte_qfread_recover_wait_with_wdt(uint32_t wait_ms)
-{
-  uint32_t wait_cnt = 0U;
-
-  /* 4G Ä£¿éÔÚ QFREAD Òì³£ºó¿ÉÄÜÈÔÔÚ·¢ËÍ±¾´ÎÔ­Ê¼Êý¾Ý£¬µÈ´ýÆä»Øµ½ AT Ì¬ */
-  for(wait_cnt = 0U; wait_cnt < wait_ms; wait_cnt++)
-  {
-    IWDT_Refresh();
-    LTE_ResetReadState();
-    Delay_ms(1);
-  }
-
-  LTE_ResetReadState();
-  IWDT_Refresh();
-}
-
-
-int32_t iap_upgrade( uint8_t up_flag)
-{
-  uint32_t expect_size = 0U, expect_crc = 0U, file_len = 0U, file_count = LTE_READ_CHUNK_SIZE;
-  uint32_t crc, erase_count, up_file_addr = upgrade_cfg.fw1_addr; /* Ä¬ÈÏµØÖ· */
-  uint32_t write_offset = 0;
-  uint32_t read_wait_cnt = 0;
-  uint32_t diag_recv = 0U, diag_expect = 0U, diag_ovre = 0U, diag_fe = 0U, diag_ne = 0U;
-  uint8_t rx_fault = 0U;
-  int32_t qf_fd = -1;
-  char qfread_cmd[40];
-  char qfclose_cmd[24];
-  
-  static uint8_t fw_flag = 0, up_count = 0;
-  
-
-
-  if (up_flag == 0x3A)
-  {
-    /* Ö÷¶¯Éý¼¶£ºÇÐ»»µ½ÁíÒ»¸ö»º´æÇø£¨1 <-> 2£© */
-    if (upgrade.fw_flag == 1)
-    {
-      fw_flag = 2;
-    }
-    else
-    {
-      fw_flag = 1;
-    }
-    up_file_addr = (fw_flag == 2) ? upgrade_cfg.fw2_addr : upgrade_cfg.fw1_addr;
-  }
-  else if (up_flag == 0xAA)
-  {
-    /* »ØÍË»ò°´±êÖ¾Ö´ÐÐ£ºÓÅÏÈÊ¹ÓÃ½á¹¹ÖÐ¼ÇÂ¼µÄ fw_flag£¨ÓÐÐ§ÐÔ¼ì²é£© */
-    if (upgrade.fw_flag == 2) fw_flag = 2;
-    else fw_flag = 1;
-    up_file_addr = (fw_flag == 2) ? upgrade_cfg.fw2_addr : upgrade_cfg.fw1_addr;
-  }
-
-  printf("selected fw_flag:%d\tup_file_addr:0x%X \r\n", fw_flag, up_file_addr);
-
-  if(up_flag == 0x3A)
-  {
-    expect_size = upgrade.size;
-    expect_crc = upgrade.crc;
-  }
-  else if((fw_flag >= 1U) && (fw_flag <= 2U) &&
-          (upgrade.fw[fw_flag].size > 0U) &&
-          (upgrade.fw[fw_flag].size != 0xFFFFFFFFU) &&
-          (upgrade.fw[fw_flag].crc != 0xFFFFFFFFU))
-  {
-    expect_size = upgrade.fw[fw_flag].size;
-    expect_crc = upgrade.fw[fw_flag].crc;
-  }
-  if((expect_size == 0U) || (expect_size == 0xFFFFFFFFU) ||
-     (expect_crc == 0xFFFFFFFFU))
-  {
-    printf("expect param invalid, abort\r\n");
-    iap_upgrade_state_save(0x5A, 0, 1);
-  }
-  upgrade.size = expect_size;
-  
-  // ²Á³ý¹Ì¼þ»º´æÇø
-//  printf("erase_count:%d\tupgrade.size:%d\r\n", erase_count, upgrade.size);
-  
-  // »ØÍË¹¦ÄÜ
-  if(up_flag == 0xAA)
-  {
-      crc = CRC32((uint8_t *)up_file_addr, expect_size);
-      printf("AA up crc:0x%X\r\n", crc);
-      
-      if(crc == upgrade.fw[fw_flag].crc)
-      {
-flag_0xAA:
-        IWDT_Refresh();
-        erase_count = flash_erase_with_wdt(upgrade_cfg.app_addr, expect_size);
-        (void)erase_count;
-        flash_write_with_wdt(upgrade_cfg.app_addr, (uint8_t *)up_file_addr, expect_size);
-
-        crc = CRC32((uint8_t *)upgrade_cfg.app_addr, expect_size);
-        printf("AA app crc:0x%X\r\n", crc);
-        
-        if(crc == upgrade.fw[fw_flag].crc)
-        {
-          // Éý¼¶³É¹¦
-          upgrade.fw_flag = fw_flag;
-          iap_upgrade_state_save(0x5A, 0, 1);
-        }
-        else
-        {
-           if(up_count < 5 )
-          {
-            up_count++;
-            goto flag_0xAA;
-            //iap_upgrade_state_save(0xAA, upgrade.up_count += 1, 1);
-          }
-          else NVIC_SystemReset();
-        }
-      }
-      else NVIC_SystemReset();
-  }
-  
-  up_count = 0;
-  eg800k_init();
-  
-flag_0x3A:
-  IWDT_Refresh();
-  if(qf_fd >= 0)
-  {
-    (void)snprintf(qfclose_cmd, sizeof(qfclose_cmd), "AT+QFCLOSE=%d\r\n", (int)qf_fd);
-    LTE_SendCmdWaitResp(qfclose_cmd, "OK", 300);
-  }
-  LTE_ResetReadState();
-  file_len = expect_size;
-  write_offset = 0;
-  read_wait_cnt = 0;
-  qf_fd = -1;
-  erase_count = flash_erase_with_wdt(up_file_addr, expect_size);
-  (void)erase_count;
-
-  LTE_SendCmdWaitResp("AT\r\n\0", "OK", 500);
-  LTE_SendCmdWaitResp("ATE0\r\n\0", "OK", 500);
-  
-  if(LTE_SendCmdWaitResp("AT+QFOPEN=\"UFS:iot_update.bin\",2\r\n\0", "+QFOPEN:", 1000) != 0)
-  {
-    iap_upgrade_state_save(0x5A, 0, 1);
-  }
-  qf_fd = get_qfopen_fd((char *)uart3_rx_buf);
-  if(qf_fd < 0)
-  {
-    iap_upgrade_state_save(0x5A, 0, 1);
-  }
-
-//  LTE_SendCmdWaitResp("AT+QFLST=\"*\"\r\n\0", "OK", 10000);
-//  Delay_ms(500);
-
-  if(LTE_SendCmdWaitResp("AT+QFLST=\"UFS:iot_update.bin\"\r\n\0", "+QFLST:", 1000) ==0)
-  {
-    int32_t file_size = get_file_len((char *)uart3_rx_buf);
-    printf("QFLST file size:%ld\texpect size:%lu\r\n", (long)file_size, (unsigned long)expect_size);
-    if((file_size <= 0) || ((uint32_t)file_size != expect_size))
-    {
-      (void)snprintf(qfclose_cmd, sizeof(qfclose_cmd), "AT+QFCLOSE=%d\r\n", (int)qf_fd);
-      LTE_SendCmdWaitResp(qfclose_cmd, "OK", 300);
-      iap_upgrade_state_save(0x5A, 0, 1);
-    }
-    else
-    {
-      printf("up file size ok!\r\n");
-    }
-  }
-  else
-  {
-    (void)snprintf(qfclose_cmd, sizeof(qfclose_cmd), "AT+QFCLOSE=%d\r\n", (int)qf_fd);
-    LTE_SendCmdWaitResp(qfclose_cmd, "OK", 300);
-    iap_upgrade_state_save(0x5A, 0, 1);
-  }
-  
-  while(1)
-  {
-    rx_fault = LTE_TakeRxFaultSnapshot(&diag_recv, &diag_expect, &diag_ovre, &diag_fe, &diag_ne);
-    if(rx_fault != 0U)
-    {
-      if(up_count < 5U)
-      {
-        up_count++;
-        printf("uart rx fault, restart file:%d recv:%lu expect:%lu ovre:%lu fe:%lu ne:%lu\r\n",
-               up_count,
-               (unsigned long)diag_recv,
-               (unsigned long)diag_expect,
-               (unsigned long)diag_ovre,
-               (unsigned long)diag_fe,
-               (unsigned long)diag_ne);
-        lte_qfread_recover_wait_with_wdt(5000U);
-        goto flag_0x3A;
-      }
-      else
-      {
-        iap_upgrade_state_save(0x5A, 0, 1);
-      }
-    }
-    
-    if(file_len < LTE_READ_CHUNK_SIZE)  file_count = file_len;
-    else file_count = LTE_READ_CHUNK_SIZE;
-
-    if(file_len > 0 && RX_FLAG == 0)
-    {
-      IWDT_Refresh();
-      (void)snprintf(qfread_cmd, sizeof(qfread_cmd), "AT+QFREAD=%d,%lu\r\n", (int)qf_fd, (unsigned long)file_count);
-      LTE_SendCmdWaitResp(qfread_cmd, NULL, 100);
-      RX_FLAG = 1;
-      read_wait_cnt = 0;
-    }
-    else if((RX_FLAG == 1) || (RX_FLAG == 2))
-    {
-      IWDT_Refresh();
-      read_wait_cnt++;
-      if(read_wait_cnt >= 10000U) /* 10s timeout with 1ms loop delay */
-      {
-        if(LTE_TakeRxFaultSnapshot(&diag_recv, &diag_expect, &diag_ovre, &diag_fe, &diag_ne) == 0U)
-        {
-          LTE_GetRxDiagSnapshot(&diag_recv, &diag_expect, &diag_ovre, &diag_fe, &diag_ne);
-        }
-        LTE_ResetReadState();
-        read_wait_cnt = 0;
-        if(up_count < 5U)
-        {
-          up_count++;
-          printf("QFREAD timeout, restart file:%d recv:%lu expect:%lu ovre:%lu fe:%lu ne:%lu\r\n",
-                 up_count,
-                 (unsigned long)diag_recv,
-                 (unsigned long)diag_expect,
-                 (unsigned long)diag_ovre,
-                 (unsigned long)diag_fe,
-                 (unsigned long)diag_ne);
-          lte_qfread_recover_wait_with_wdt(5000U);
-          goto flag_0x3A;
-        }
-        else
-        {
-          iap_upgrade_state_save(0x5A, 0, 1);
-        }
-      }
-      Delay_ms(1);
-    }
-    else if(RX_FLAG == 3)
-    {
-      uint32_t chunk_size = FILE_SIZE;
-      if((chunk_size == 0U) || (chunk_size > file_count))
-      {
-        if(LTE_TakeRxFaultSnapshot(&diag_recv, &diag_expect, &diag_ovre, &diag_fe, &diag_ne) == 0U)
-        {
-          LTE_GetRxDiagSnapshot(&diag_recv, &diag_expect, &diag_ovre, &diag_fe, &diag_ne);
-        }
-        LTE_ResetReadState();
-        read_wait_cnt = 0;
-        if(up_count < 5U)
-        {
-          up_count++;
-          printf("QFREAD size error, restart file:%d chunk:%lu recv:%lu expect:%lu ovre:%lu fe:%lu ne:%lu\r\n",
-                 up_count,
-                 (unsigned long)chunk_size,
-                 (unsigned long)diag_recv,
-                 (unsigned long)diag_expect,
-                 (unsigned long)diag_ovre,
-                 (unsigned long)diag_fe,
-                 (unsigned long)diag_ne);
-          lte_qfread_recover_wait_with_wdt(5000U);
-          goto flag_0x3A;
-        }
-        else
-        {
-          iap_upgrade_state_save(0x5A, 0, 1);
-        }
-        continue;
-      }
-      if((write_offset > expect_size) || (chunk_size > (expect_size - write_offset)))
-      {
-        printf("write overflow offset:%lu size:%lu up:%lu\r\n",
-               (unsigned long)write_offset,
-               (unsigned long)chunk_size,
-               (unsigned long)expect_size);
-        iap_upgrade_state_save(0x5A, 0, 1);
-      }
-      printf("flash write offset:%lu size:%lu\r\n", (unsigned long)write_offset, (unsigned long)chunk_size);
-      flash_write_with_wdt(up_file_addr + write_offset, up_file_buf, chunk_size);
-      write_offset += chunk_size;
-      /* ÔÚ³É¹¦Ð´ÈëºóÔÙ¼õÉÙÊ£Óà³¤¶È£¬±ÜÃâÔÚ·¢ËÍÃüÁîºóÁ¢¼´°Ñ file_len ÖÃÎª0 µ¼ÖÂÌáÇ°¹Ø±Õ */
-      if (file_len > 0)
-      {
-        if (file_len > chunk_size) file_len -= chunk_size;
-        else file_len = 0;
-      }
-      printf("file_len %lu\r\n\r\n", (unsigned long)(expect_size - file_len));
-      read_wait_cnt = 0;
-      RX_FLAG = 0;
-      FILE_SIZE = 0;
-    }
-    else if( file_len == 0)
-    {
-      IWDT_Refresh();
-      (void)snprintf(qfclose_cmd, sizeof(qfclose_cmd), "AT+QFCLOSE=%d\r\n", (int)qf_fd);
-      LTE_SendCmdWaitResp(qfclose_cmd, "OK", 300);
-      Delay_ms(200);
-      crc = CRC32((uint8_t *)up_file_addr, expect_size);
-      printf("up crc:0x%X\r\n", crc);
-
-      if(crc == expect_crc)
-      {
-        printf("up file crc ojbk!\r\n");
-
-        // ÎÄ¼þ³É¹¦¸üÐÂµ½»º´æ¹Ì¼þÇøÓò
-        upgrade.fw[fw_flag].crc = crc;
-        upgrade.fw[fw_flag].size = expect_size;
-
-        uint8_t app_count = 0;
-
-flag_app:
-        IWDT_Refresh();        
-        erase_count = flash_erase_with_wdt(upgrade_cfg.app_addr, expect_size);
-        (void)erase_count;
-        flash_write_with_wdt(upgrade_cfg.app_addr, (uint8_t *)up_file_addr, expect_size);
-
-        crc = CRC32((uint8_t *)upgrade_cfg.app_addr, expect_size);
-        printf("app crc:0x%X\r\n", crc);
-
-        if(crc == expect_crc)
-        {
-          // ÎÄ¼þ³É¹¦¸üÐÂµ½appÇøÓò
-          printf("app file crc ojbk!\r\n");
-          upgrade.fw_flag = fw_flag;
-          upgrade.fw[fw_flag].size = expect_size;
-          upgrade.fw[fw_flag].crc = crc;
-          iap_upgrade_state_save(0x5A, 0, 1);
-        }
-        else
-        {
-          if(app_count < 5 )
-          {
-            app_count++;
-            goto flag_app;
-          }
-          else iap_upgrade_state_save(0xAA, 0, 0); // ³¬¹ý5´Î£¬Ö´ÐÐ»ØÍË°æ±¾²Ù×÷¡£
-        }
-      }
-      else
-      {
-        if(up_count < 5 )
-        {
-          up_count++;
-          file_len = expect_size;
-          goto flag_0x3A;
-        }
-        else iap_upgrade_state_save(0x5A, 0, 1);
-      }
-
-    }
-    else
-    {
-      Delay_ms(1);
-    }
-  }
-
-  return -1;
-}
-
-
-
 
 
 /** @defgroup USART_Interrupt_Functions Functions
@@ -711,7 +192,7 @@ int main(void)
   
   Delay_Init();
 
-  // Ê¹ÄÜSWJ¿ÚÏÂÔØ£¬½ûÓÃjtagÏÂÔØ¡£
+  // Ê¹ï¿½ï¿½SWJï¿½ï¿½ï¿½ï¿½ï¿½Ø£ï¿½ï¿½ï¿½ï¿½ï¿½jtagï¿½ï¿½ï¿½Ø¡ï¿½
   RCM_EnableAPB2PeriphClock(RCM_APB2_PERIPH_AFIO);
   GPIO_ConfigPinRemap(GPIO_REMAP_SWJ_JTAGDISABLE);
  
@@ -734,12 +215,33 @@ int main(void)
   IWDT_Refresh();
   IWDT_Enable();
     
-  if( req >= 0 )      iap_upgrade(req);
-  else  NVIC_SystemReset();
-  
+  if(req == 0x3A)
+  {
+    UPGRADE_CTX_T ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.action = UPGRADE_ACTION_NETWORK;
+    ctx.fw_flag = (upgrade.fw_flag == 1) ? 2 : 1;   /* toggle slot */
+    ctx.up_file_addr = (ctx.fw_flag == 2) ? upgrade_cfg.fw2_addr : upgrade_cfg.fw1_addr;
+    ctx.expect_size = upgrade.size;
+    ctx.expect_crc = upgrade.crc;
+    upgrade_run(&ctx);
+  }
+  else if(req == 0xAA)
+  {
+    UPGRADE_CTX_T ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.action = UPGRADE_ACTION_ROLLBACK;
+    ctx.fw_flag = (upgrade.fw_flag == 2) ? 2 : 1;   /* current slot */
+    ctx.up_file_addr = (ctx.fw_flag == 2) ? upgrade_cfg.fw2_addr : upgrade_cfg.fw1_addr;
+    ctx.expect_size = upgrade.fw[ctx.fw_flag].size;
+    ctx.expect_crc = upgrade.fw[ctx.fw_flag].crc;
+    upgrade_run(&ctx);
+  }
+
+  NVIC_SystemReset();
+
   while(1)
-  {      
-    
+  {
     Delay_ms(100);
   }
 }

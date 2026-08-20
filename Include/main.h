@@ -47,7 +47,7 @@
 
 
 
-#define VERSION "1.7.0.102\0"
+#define VERSION "2.0.0.100\0"
 
 
 #define FLASH_PAGE_SIZE 2048
