@@ -1,13 +1,16 @@
 /*!
  * @file        upgrade_ctrl.c
  *
- * @brief       Upgrade state machine replacing the legacy goto-based
- *              iap_upgrade() in main.c. Two actions:
- *                - 0x3A: download firmware from the 4G module UFS into
- *                        a firmware slot, verify CRC, copy to app area
- *                - 0xAA: copy the current pre-verified slot to app area
- *              Retries are explicit counters in while loops, no gotos.
- *              All long-running loops refresh the IWDT.
+ * @brief       Upgrade state machine. Two firmware regions:
+ *                - run region    (APP_ADDR, fixed link address, runs APP)
+ *                - backup region (UP_BACKUP_ADDR, holds last-known-good)
+ *              Actions:
+ *                - 0x3A: preserve last-good into the backup region, then
+ *                        download the new firmware directly into the run
+ *                        region and verify its CRC
+ *                - 0xAA: copy the backup region back to the run region
+ *              Every copy/erase/write is verified by CRC afterwards;
+ *              all long-running loops refresh the IWDT.
  */
 
 #include "main.h"
@@ -82,6 +85,64 @@ static void upgrade_recover_wait_with_wdt(uint32_t wait_ms)
   IWDT_Refresh();
 }
 
+/* abort the upgrade and boot the current run-region firmware;
+ * clears any pending trial request so the old firmware is not rolled back.
+ * flag is saved as 0xFF (first-boot semantics) instead of 0x5A: the run
+ * region may hold firmware whose fw[0] metadata was never recorded
+ * (e.g. flashed directly by J-Link). Saving 0x5A there would lock the
+ * boot loader in an endless reset loop - fw[0] invalid -> cannot jump,
+ * fw[1] invalid -> cannot rollback. Abort happens before the run region
+ * is erased, so the current firmware is still intact and 0xFF jumps to it. */
+static void upgrade_abort(void)
+{
+  printf("upgrade abort, boot current firmware\r\n");
+  upgrade.status = UPGRADE_STATUS_OK;
+  upgrade.up_count = 0U;
+  iap_upgrade_state_save(0xFF, 0, 1);
+}
+
+/* ① preserve: copy the run region into the backup region before touching it.
+ * Returns 0 when the backup holds a valid last-known-good (copied or
+ * skipped), -1 when the copy failed (caller must abort and keep the run
+ * region intact). */
+static int32_t upgrade_preserve_backup(const UPGRADE_CTX_T *ctx)
+{
+  uint32_t crc = 0U;
+
+  /* run region invalid → keep whatever the backup already holds */
+  if(!FW_VALID(&upgrade.fw[0]) ||
+     (CRC32((uint8_t *)ctx->run_addr, upgrade.fw[0].size) != upgrade.fw[0].crc))
+  {
+    printf("run region invalid, skip preserve\r\n");
+    return 0;
+  }
+
+  /* backup already holds the same firmware → skip the copy */
+  if(FW_VALID(&upgrade.fw[1]) && (upgrade.fw[1].size == upgrade.fw[0].size) &&
+     (upgrade.fw[1].crc == upgrade.fw[0].crc) &&
+     (CRC32((uint8_t *)ctx->backup_addr, upgrade.fw[1].size) == upgrade.fw[1].crc))
+  {
+    printf("backup already current, skip preserve\r\n");
+    return 0;
+  }
+
+  printf("preserve: copy run -> backup\r\n");
+  IWDT_Refresh();
+  (void)hw_flash_copy(ctx->run_addr, ctx->backup_addr, upgrade.fw[0].size);
+
+  crc = CRC32((uint8_t *)ctx->backup_addr, upgrade.fw[0].size);
+  if(crc != upgrade.fw[0].crc)
+  {
+    printf("backup copy crc mismatch\r\n");
+    return -1;
+  }
+
+  /* backup region now holds the previous version; persisted at commit */
+  upgrade.fw[1].size = upgrade.fw[0].size;
+  upgrade.fw[1].crc  = upgrade.fw[0].crc;
+  return 0;
+}
+
 void upgrade_run(const UPGRADE_CTX_T *ctx)
 {
   AT_FILE_CTX_T file_ctx;
@@ -92,15 +153,15 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
 
   if(ctx == NULL)
   {
-    iap_upgrade_state_save(0x5A, 0, 1);
+    upgrade_abort();
   }
 
   /* empty flash reads as 0xFFFFFFFF: reject invalid expectations */
   if((ctx->expect_size == 0U) || (ctx->expect_size == 0xFFFFFFFFU) ||
-     (ctx->expect_crc == 0xFFFFFFFFU))
+     (ctx->expect_size > APP_MAX_SIZE) || (ctx->expect_crc == 0xFFFFFFFFU))
   {
     printf("expect param invalid, abort\r\n");
-    iap_upgrade_state_save(0x5A, 0, 1);
+    upgrade_abort();
   }
 
   memset(&file_ctx, 0, sizeof(file_ctx));
@@ -110,11 +171,21 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
   if(ctx->action == UPGRADE_ACTION_NETWORK)
   {
     upgrade.size = ctx->expect_size;
+    upgrade.crc = ctx->expect_crc;
+    printf("expect size:%lu crc:0x%X\r\n",
+           (unsigned long)ctx->expect_size, (unsigned int)ctx->expect_crc);
 
     if(lte_modem_init(&LTE_MODEM_CFG_EG800K) != LTE_MODEM_ERR_OK)
     {
       printf("modem init failed, abort\r\n");
-      iap_upgrade_state_save(0x5A, 0, 1);
+      upgrade_abort();
+    }
+
+    /* ① preserve last-known-good before touching the run region */
+    if(upgrade_preserve_backup(ctx) != 0)
+    {
+      printf("preserve backup failed, abort\r\n");
+      upgrade_abort();
     }
 
     while(dl_retry < UPGRADE_MAX_DL_RETRIES)
@@ -125,9 +196,9 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
       printf("download attempt %d/%d\r\n",
              (int)(dl_retry + 1U), (int)UPGRADE_MAX_DL_RETRIES);
 
-      /* erase target slot before download */
+      /* erase run region before download */
       IWDT_Refresh();
-      (void)flash_erase_with_wdt(ctx->up_file_addr, ctx->expect_size);
+      (void)flash_erase_with_wdt(ctx->run_addr, ctx->expect_size);
 
       /* open file and validate size */
       if(at_file_open(&file_ctx, UPGRADE_FILE_NAME) != AT_FILE_ERR_OK)
@@ -151,7 +222,7 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
         printf("up file size ok!\r\n");
       }
 
-      /* chunked download loop */
+      /* chunked download straight into the run region */
       if(dl_failed == 0)
       {
         while(offset < ctx->expect_size)
@@ -179,12 +250,12 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
             printf("write overflow offset:%lu size:%lu up:%lu\r\n",
                    (unsigned long)offset, (unsigned long)actual,
                    (unsigned long)ctx->expect_size);
-            iap_upgrade_state_save(0x5A, 0, 1);
+            upgrade_abort();
           }
 
           printf("flash write offset:%lu size:%lu\r\n",
                  (unsigned long)offset, (unsigned long)actual);
-          flash_write_with_wdt(ctx->up_file_addr + offset, up_file_buf, actual);
+          flash_write_with_wdt(ctx->run_addr + offset, up_file_buf, actual);
           offset += actual;
         }
       }
@@ -202,15 +273,28 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
 
       /* verify downloaded firmware CRC */
       Delay_ms(200);
-      crc = CRC32((uint8_t *)ctx->up_file_addr, ctx->expect_size);
+      crc = CRC32((uint8_t *)ctx->run_addr, ctx->expect_size);
       printf("up crc:0x%X\r\n", (unsigned int)crc);
 
       if(crc == ctx->expect_crc)
       {
         printf("up file crc ok!\r\n");
-        upgrade.fw[ctx->fw_flag].crc = crc;
-        upgrade.fw[ctx->fw_flag].size = ctx->expect_size;
-        break;   /* download success */
+
+        /* commit: the run region holds the new firmware */
+        upgrade.fw[0].size = ctx->expect_size;
+        upgrade.fw[0].crc  = crc;
+        upgrade.fw_flag = 1U;
+        if(upgrade.status == UPGRADE_STATUS_TRIAL)
+        {
+          /* APP requested trial protection: counted down on each boot */
+          upgrade.up_count = UPGRADE_TRIAL_LIMIT;
+        }
+        else
+        {
+          upgrade.status = UPGRADE_STATUS_OK;
+          upgrade.up_count = 0U;
+        }
+        iap_upgrade_state_save(0x5A, upgrade.up_count, 1);
       }
 
       printf("up file crc mismatch, retry %d/%d\r\n",
@@ -222,58 +306,50 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
 
     if(dl_retry >= UPGRADE_MAX_DL_RETRIES)
     {
-      printf("download retries exhausted, abort\r\n");
-      iap_upgrade_state_save(0x5A, 0, 1);
+      /* the backup region holds the last-known-good (preserve step);
+       * schedule a local rollback on the next boot */
+      printf("download retries exhausted, schedule rollback\r\n");
+      upgrade.status = UPGRADE_STATUS_OK;
+      upgrade.up_count = 0U;
+      iap_upgrade_state_save(0xAA, 0, 0);
     }
   }
   else
   {
-    /* 0xAA rollback: slot must match the recorded CRC before copying */
-    crc = CRC32((uint8_t *)ctx->up_file_addr, ctx->expect_size);
-    printf("AA slot crc:0x%X\r\n", (unsigned int)crc);
-    if(crc != ctx->expect_crc)
+    /* ================= 0xAA rollback: backup -> run ================= */
+    if(!FW_VALID(&upgrade.fw[1]) ||
+       (CRC32((uint8_t *)ctx->backup_addr, upgrade.fw[1].size) != upgrade.fw[1].crc))
     {
-      printf("AA slot crc mismatch, reset\r\n");
+      printf("AA backup crc mismatch, reset\r\n");
       NVIC_SystemReset();
     }
-  }
 
-  /* ================= app write phase (0x3A and 0xAA) ================= */
-  while(app_retry < UPGRADE_MAX_APP_RETRIES)
-  {
-    IWDT_Refresh();
-    (void)flash_erase_with_wdt(upgrade_cfg.app_addr, ctx->expect_size);
-    flash_write_with_wdt(upgrade_cfg.app_addr, (uint8_t *)ctx->up_file_addr,
-                         ctx->expect_size);
-
-    crc = CRC32((uint8_t *)upgrade_cfg.app_addr, ctx->expect_size);
-    printf("app crc:0x%X\r\n", (unsigned int)crc);
-
-    if(crc == ctx->expect_crc)
+    while(app_retry < UPGRADE_MAX_APP_RETRIES)
     {
-      printf("app crc ok!\r\n");
-      upgrade.fw_flag = ctx->fw_flag;
-      upgrade.fw[ctx->fw_flag].size = ctx->expect_size;
-      upgrade.fw[ctx->fw_flag].crc = crc;
-      iap_upgrade_state_save(0x5A, 0, 1);
+      IWDT_Refresh();
+      (void)hw_flash_copy(ctx->backup_addr, ctx->run_addr, upgrade.fw[1].size);
+
+      crc = CRC32((uint8_t *)ctx->run_addr, upgrade.fw[1].size);
+      printf("app crc:0x%X\r\n", (unsigned int)crc);
+
+      if(crc == upgrade.fw[1].crc)
+      {
+        printf("rollback ok!\r\n");
+        upgrade.fw[0].size = upgrade.fw[1].size;
+        upgrade.fw[0].crc  = upgrade.fw[1].crc;
+        upgrade.fw_flag = 1U;
+        upgrade.status = UPGRADE_STATUS_OK;
+        upgrade.up_count = 0U;
+        iap_upgrade_state_save(0x5A, 0, 1);
+      }
+
+      printf("app crc mismatch, retry %d/%d\r\n",
+             (int)(app_retry + 1U), (int)UPGRADE_MAX_APP_RETRIES);
+      app_retry++;
     }
 
-    printf("app crc mismatch, retry %d/%d\r\n",
-           (int)(app_retry + 1U), (int)UPGRADE_MAX_APP_RETRIES);
-    app_retry++;
-  }
-
-  /* app write retries exhausted */
-  if(ctx->action == UPGRADE_ACTION_NETWORK)
-  {
-    /* schedule local rollback on next boot */
-    printf("app write retries exhausted, schedule rollback\r\n");
-    iap_upgrade_state_save(0xAA, 0, 0);
-  }
-  else
-  {
-    /* keep the 0xAA flag and retry the rollback */
-    printf("app write retries exhausted, reset\r\n");
+    /* copy retries exhausted: keep the 0xAA flag and retry on next boot */
+    printf("rollback write retries exhausted, reset\r\n");
     NVIC_SystemReset();
   }
 }

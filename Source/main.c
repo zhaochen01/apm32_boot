@@ -220,21 +220,23 @@ int main(void)
     UPGRADE_CTX_T ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.action = UPGRADE_ACTION_NETWORK;
-    ctx.fw_flag = (upgrade.fw_flag == 1) ? 2 : 1;   /* toggle slot */
-    ctx.up_file_addr = (ctx.fw_flag == 2) ? upgrade_cfg.fw2_addr : upgrade_cfg.fw1_addr;
+    ctx.run_addr = upgrade_cfg.app_addr;
+    ctx.backup_addr = upgrade_cfg.fw1_addr;
     ctx.expect_size = upgrade.size;
     ctx.expect_crc = upgrade.crc;
     upgrade_run(&ctx);
   }
-  else if(req == 0xAA)
+  else if((req == 0xAA) || (req == UPGRADE_ACTION_AUTO_ROLLBACK))
   {
+    /* 0xAA: APP requested local rollback
+     * 0x5B: boot-time verification failed or trial exhausted → auto rollback */
     UPGRADE_CTX_T ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.action = UPGRADE_ACTION_ROLLBACK;
-    ctx.fw_flag = (upgrade.fw_flag == 2) ? 2 : 1;   /* current slot */
-    ctx.up_file_addr = (ctx.fw_flag == 2) ? upgrade_cfg.fw2_addr : upgrade_cfg.fw1_addr;
-    ctx.expect_size = upgrade.fw[ctx.fw_flag].size;
-    ctx.expect_crc = upgrade.fw[ctx.fw_flag].crc;
+    ctx.run_addr = upgrade_cfg.app_addr;
+    ctx.backup_addr = upgrade_cfg.fw1_addr;
+    ctx.expect_size = upgrade.fw[1].size;
+    ctx.expect_crc = upgrade.fw[1].crc;
     upgrade_run(&ctx);
   }
 

@@ -47,7 +47,7 @@ User_Uart_Config_T uart_cfg_list[] =
 	
 	{ USART3, 115200, USART_MODE_TX_RX, RCM_APB1_PERIPH_USART3,\
 		RCM_APB2_PERIPH_GPIOB, GPIOB, GPIO_PIN_10, GPIO_SPEED_50MHz, GPIO_MODE_AF_PP,\
-		RCM_APB2_PERIPH_GPIOB, GPIOB, GPIO_PIN_11, GPIO_SPEED_50MHz, GPIO_MODE_IN_FLOATING
+		RCM_APB2_PERIPH_GPIOB, GPIOB, GPIO_PIN_11, GPIO_SPEED_50MHz, GPIO_MODE_IN_PU
 	},
 		
 //	{ UART4, 115200, USART_MODE_TX_RX, RCM_APB1_PERIPH_UART4,\
@@ -69,7 +69,7 @@ void user_uart_init(void)
 {
 	GPIO_Config_T g_configStruct;
 	USART_Config_T u_configStruct;
-	
+
   User_Uart_Config_T *uart_cfg;
 	for(uint8_t i = 0; i < HW_USART_NUM; i++)
 	{
@@ -162,7 +162,7 @@ uint32_t uart_send_data(USART_T *usart, void *pdata, uint32_t len)
  */
 void USART1_Isr(void)
 {
-  /* Òì³£´¥·¢Ê±Çå±êÖ¾£¬±ÜÃâËÀÑ­»· */
+  /* ï¿½ì³£ï¿½ï¿½ï¿½ï¿½Ê±ï¿½ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ñ­ï¿½ï¿½ */
   if(USART_ReadIntFlag(USART1, USART_INT_RXBNE))
   {
     (void)USART_RxData(USART1);

@@ -6,10 +6,10 @@
 
 APM32E103 Boot Loader：通过 Quectel CAT-1 4G 模块进行远程固件升级。从模块 UFS 文件系统下载固件并写入 MCU 内部 Flash。
 
-- **MCU**：APM32E103RE（ARM Cortex-M3，36MHz，512KB Flash / 128KB SRAM）
+- **MCU**：APM32E103RE（ARM Cortex-M3，72MHz，512KB Flash / 128KB SRAM）
 - **4G 模块**：Quectel CAT-1 系列（EC800/EG800K），AT 指令集
 - **编译器**：ARMCC（Keil MDK v5）；GCC 亦可通过 `#ifdef` 块支持
-- **版本**：v1.8.1（见 `Include/main.h:50` 的 `VERSION`）
+- **版本**：v2.1.0.100（见 `Include/main.h:50` 的 `VERSION`）
 - **字符编码**：C 源码注释与字符串使用 GBK/GB2312
 
 ## 构建
@@ -33,15 +33,16 @@ UV4.exe -b apm32e103_boot.uvprojx -j0 -o build.log
 ```
 main.c
   ├── iap_init()          → 读取 Flash 中的升级元数据，决定动作
-  └── upgrade_run(ctx)    → 升级状态机（下载 + 校验 + 写 Flash）
+  └── upgrade_run(ctx)    → 升级状态机（保底 + 下载 + 校验 + 提交）
+        ├── upgrade_preserve_backup() → 复制运行区 → 保底区并回读校验
         ├── lte_modem_init()      → 4G 模块上下电、RDY 等待（可重试）、ATE0
         ├── at_file_open()        → AT+QFOPEN
         ├── at_file_get_size()    → AT+QFLST（校验大小与预期值）
         ├── at_file_read()        → AT+QFREAD 循环（每块 40KB）
         ├── at_file_close()       → AT+QFCLOSE
         ├── CRC32()       → 软件 CRC32（IEEE 802.3，多项式 0xEDB88320）
-        ├── flash_erase_with_wdt() → 页对齐擦除，带 IWDT 刷新
-        └── flash_write_with_wdt() → 字对齐写入，带 IWDT 刷新
+        ├── hw_flash_copy() → 页对齐擦除 + 逐页复制（保底/回退共用），带 IWDT 刷新
+        └── flash_write_with_wdt() → 下载分块写入运行区，带 IWDT 刷新
   └── Jump_to_App()       → 关闭所有 IRQ，设置 MSP，跳转到 APP_ADDR
 
 支撑模块（自底向上分层）：
@@ -74,24 +75,25 @@ main.c
 
 故障恢复：发生 UART 错误或大小不匹配时，ISR 复位到行模式；`at_take_fault_snapshot()` 读取诊断信息（recv/expect/OVRE/FE/NE）。调用方（`upgrade_ctrl`）最多重试 5 次，每次尝试之间对模块执行上下电。
 
-### 双槽位固件策略
+### 双区策略（运行区 + 保底区）
 
-两个固件槽位（FW1 @ `0x802A000`、FW2 @ `0x804E000`，各 144KB）提供回退保护：
+两个 224KB 固件区（运行区 @ `0x8006000`、保底区 @ `0x803E000`）提供回退保护：
 
-- **0x3A（网络升级）**：切换到*另一个*槽位（`fw_flag` 1↔2），将新固件下载到该槽位，CRC 校验通过后复制到 APP 区并标记成功
-- **0xAA（本地回退）**：使用*当前*槽位中已验证过的固件，复制到 APP 区（无需下载）。若 APP 区写入后 CRC 失败，最多重试 5 次，然后触发 `0xAA` 回退。
+- **0x3A（网络升级）**：先保底——复制运行区 → 保底区并回读校验（失败则中止升级，运行区保持不动）；再擦除运行区，将新固件**直接下载进运行区**（QFREAD 40KB 分块），CRC 校验通过后提交元数据（`fw[0]`=新、`fw[1]`=旧、trial 计数）并复位启动。下载重试 5 次仍失败 → 写 `0xAA`，下次启动走回退。
+- **0xAA（本地回退）**：将保底区（最后一个已知良好版本）复制回运行区（CRC 预检 + 回读校验，失败重试 5 次）。`iap_init` 启动校验失败（运行区 CRC 与 `fw[0]` 不符）或 trial 耗尽时，也通过该路径自动回退（`iap_init` 返回 `UPGRADE_ACTION_AUTO_ROLLBACK`）。
+- **trial 回退（运行期崩溃）**：APP 请求升级时写 `status=0x01` 即启用；升级成功后 `up_count=3`，Boot 每次启动递减一次；APP 稳定启动后写 `status=0x02` 解除。计数耗尽未获确认 → 自动回退保底区。
 
-`upgrade.fw[0]` 镜像当前运行固件的 CRC/大小，供 APP 参考。
+`upgrade.fw[0]` 镜像运行区固件的 CRC/大小，`upgrade.fw[1]` 镜像保底区，供 APP 参考。
 
 ### 重试模式
 
-下载（0x3A）和 APP 写入两个阶段均使用显式的 while 循环重试计数器（`dl_retry`/`app_retry`），上限为 5（`UPGRADE_MAX_DL_RETRIES`/`UPGRADE_MAX_APP_RETRIES`）。不使用 goto。
+下载（0x3A）和保底/回退复制（0xAA）阶段均使用显式的 while 循环重试计数器（`dl_retry`/`app_retry`），上限为 5（`UPGRADE_MAX_DL_RETRIES`/`UPGRADE_MAX_APP_RETRIES`）。不使用 goto。
 
 ```c
 while (dl_retry < UPGRADE_MAX_DL_RETRIES) {
-  // 擦除槽位、打开文件、分块下载循环
+  // 擦除运行区、打开文件、分块下载循环
   if (dl_failed) { dl_retry++; continue; }   // 完整模块上下电 + 恢复等待
-  if (CRC32(slot) == expect_crc) break;      // 下载成功
+  if (CRC32(run) == expect_crc) break;       // 下载成功
   dl_retry++;
 }
 ```
@@ -113,7 +115,7 @@ __enable_irq();
 
 ### 看门狗（IWDT）
 
-- 在 `main()` 中配置：分频 256，重装载值 2343 → 36MHz 下约 15 秒超时
+- 在 `main()` 中配置：分频 256，重装载值 2343 → 约 15 秒超时（IWDT 由内部 40kHz RC 驱动，与系统时钟 36/72MHz 无关，改主频不必重算）
 - 所有长循环（Flash 擦除、文件下载、QFREAD 恢复等待）中必须调用 `IWDT_Refresh()`
 - `Delay_ms()` 依赖 `SysTick_Handler` 递减 `cntMs` —— 若 SysTick 停止，看门狗将复位 MCU
 
@@ -126,45 +128,48 @@ __enable_irq();
 | 地址 | 大小 | 用途 |
 |---------|------|---------|
 | 0x08000000 | 24KB | Boot Loader |
-| 0x08006000 | 144KB | APP 镜像 |
-| 0x0802A000 | 144KB | 固件槽位 1（FW1） |
-| 0x0804E000 | 144KB | 固件槽位 2（FW2） |
+| 0x08006000 | 224KB | 运行区（APP 镜像，固定链接地址） |
+| 0x0803E000 | 224KB | 保底区（最后一个已知良好版本） |
+| 0x08076000 | 32KB | 预留空间 |
 | 0x0807E000 | 2KB | 升级元数据（`Upgrade_t`） |
 | 0x0807E800 | 2KB | 升级配置（`Upgrade_cfg_t`） |
 
-Flash 页大小：2048 字节（`FLASH_PAGE_SIZE`）；0x08072000~0x0807DFFF 为预留空间（48KB）。
+Flash 页大小：2048 字节（`FLASH_PAGE_SIZE`）；固件大小上限 224KB（`APP_MAX_SIZE`，须 ≥200KB 且 ≤224KB）。
 
 ## 关键数据结构
 
 ```c
 // Upgrade_t @ UPGRADE_ADDR (0x0807E000)，紧凑打包
 typedef struct {
-  uint8_t   flag;        // 0x5A=有效/APP  0x3A=网络升级  0xAA=本地回退  0xFF=首次启动
-  uint8_t   up_count;    // 重试计数器
-  uint8_t   fw_flag;     // 活动槽位：1 或 2
-  uint8_t   status;
+  uint8_t   flag;        // 0x5A=有效/跳转  0x3A=网络升级  0xAA=本地回退  0xFF=首次启动
+  uint8_t   up_count;    // trial 启动尝试计数（Boot 维护）
+  uint8_t   fw_flag;     // 保留字段，固定为 1
+  uint8_t   status;      // 0x01=TRIAL（APP 请求升级时写入=启用 trial；Boot 维护递减）
+                         // 0x02=OK（APP 稳定启动后写入；Boot 回退成功后写入）
   uint32_t  size;        // 预期固件文件大小（由 APP 写入；Boot 校验）
   uint32_t  crc;         // 预期固件 CRC32（由 APP 写入；Boot 校验）
   char      url[128];    // 下载 URL
   char      name[64];    // 文件名
-  Firmware  fw[3];       // [0]=APP 镜像，[1]=FW1 元数据，[2]=FW2 元数据（{size, crc}）
+  Firmware  fw[3];       // [0]=运行区，[1]=保底区，[2]=保留（{size, crc}）
 } Upgrade_t;
 
 // Upgrade_cfg_t @ UPGRADE_CFG_ADDR (0x0807E800)
 typedef struct {
   uint32_t  config_addr;  // UPGRADE_ADDR
   uint32_t  app_addr;     // APP_ADDR
-  uint32_t  fw1_addr;     // UP_FILE_ADDR_1
-  uint32_t  fw2_addr;     // UP_FILE_ADDR_2
+  uint32_t  fw1_addr;     // UP_BACKUP_ADDR（保底区）
+  uint32_t  fw2_addr;     // 未使用（保留字段，填充为 UP_BACKUP_ADDR）
   uint32_t  data_crc;     // 以上字段的 CRC32
 } Upgrade_cfg_t;
 ```
 
 **重要字段语义**：
 - `upgrade.size`/`upgrade.crc`：由 APP 在触发 boot 前写入；Boot 读取并用于 0x3A 校验
-- `upgrade.fw[x].size`/`upgrade.fw[x].crc`：Boot 在下载成功后写入；用于 0xAA 回退和 APP 侧校验
-- `upgrade_cfg`：自带 CRC 保护；首次启动时初始化一次，提供基地址以便无需重新编译即可修改
-- 空白 Flash 状态为 `0xFFFFFFFF`——校验时始终同时检查 `> 0` 且 `!= 0xFFFFFFFFU`
+- `upgrade.fw[0]`：运行区元数据（升级成功后 = 新版本；回退后 = 保底区版本）
+- `upgrade.fw[1]`：保底区元数据（0x3A 保底复制时在 RAM 中更新，提交时落盘）；0xAA 回退与启动自动回退均取自该字段
+- `upgrade.status`/`upgrade.up_count`：trial 回退契约。APP 写 `0x3A` 同时写 `status=0x01` 才启用；APP 稳定启动后写 `status=0x02` 解除。旧 APP 不写则无 trial 行为（向后兼容）
+- `upgrade_cfg`：自带 CRC 保护；首次启动初始化一次，提供基地址以便无需重新编译即可修改；**地址与当前布局不符（旧版本迁移）时自动重新初始化**
+- 空白 Flash 状态为 `0xFFFFFFFF`——校验时始终同时检查 `> 0` 且 `!= 0xFFFFFFFFU`（`FW_VALID` 宏）
 
 ## AT 命令函数（lte_modem.h / at_file_ops.h）
 
@@ -200,17 +205,22 @@ typedef struct {
 
 ## 已知坑
 
-1. **`upgrade.fw[x]` 初始状态**：Flash 默认值为 `0xFFFFFFFF`。将其视为有效数据前必须同时检查 `> 0U` 且 `!= 0xFFFFFFFFU`。`upgrade_run()` 同样校验 `expect_size`/`expect_crc`。
+1. **`upgrade.fw[x]` 初始状态**：Flash 默认值为 `0xFFFFFFFF`。将其视为有效数据前必须同时检查 `> 0U` 且 `!= 0xFFFFFFFFU`（用 `FW_VALID` 宏，还须 `<= APP_MAX_SIZE`）。`upgrade_run()` 同样校验 `expect_size`/`expect_crc`。
 2. **CONNECT 到原始数据的竞态**：`AT+QFREAD` 数据从行模式切换到原始模式必须发生在 *ISR 回调内部*（at_transport.c 的 `at_on_line`，在 `CONNECT <len>` 行完成时）。不要把这个切换移到轮询侧（`at_wait`），否则头部之后紧接着到达的原始字节会丢失——旧代码也是在 ISR 层处理这一点的。
 3. **行队列溢出**：`s_line_queue` 只能容纳 8 行。在 `at_wait()` 消费之前若涌入超过 8 行，最旧的行会被丢弃。对 boot 流程无影响（`OK`/`+QFOPEN:` 等目标行各自独立到达），但 QFREAD 的 CONNECT 行若被丢弃会超时并重试。
 4. **重新打开前先 QFCLOSE**：0x3A 重试时，重新打开前必须调用 `at_file_close()`。遗留的文件句柄会导致 4G 模块资源泄漏。
-5. **CRC 来源取决于标志类型**：
+5. **CRC 来源取决于动作类型**：
    - 0x3A：预期大小/CRC 来自 `upgrade.size`/`upgrade.crc`（APP 提供）
-   - 0xAA：预期大小/CRC 来自 `upgrade.fw[fw_flag].size`/`.crc`（Boot 在之前成功下载时记录）
-6. **处处喂狗**：IWDT 约 15 秒（分频 256，重装载 2343）。每次 Flash 操作、`at_wait()`/`at_wait_raw_done()` 轮询、5 秒恢复等待都必须调用 `IWDT_Refresh()`。漏掉一次就会静默复位。
+   - 0xAA / 自动回退：预期大小/CRC 来自 `upgrade.fw[1].size`/`.crc`（保底区元数据，Boot 在保底复制时更新）
+6. **处处喂狗**：IWDT 约 15 秒（分频 256，重装载 2343；时钟源为内部 40kHz RC，与系统时钟无关）。每次 Flash 操作、`at_wait()`/`at_wait_raw_done()` 轮询、5 秒恢复等待都必须调用 `IWDT_Refresh()`。漏掉一次就会静默复位。
 7. **`Delay_ms()` 依赖**：依赖 `SysTick_Handler` 递减 `cntMs`。若 `SysTick_Handler` 损坏或向量表未建立，`Delay_ms()` 将永远挂起 → 看门狗复位。
 8. **`hw_board.c` 双重用途**：该文件引用了 RT-Thread API（`rt_kprintf`、`rt_thread_create`、`INIT_DEVICE_EXPORT`），并定义了与 `main.c` 中相同的 `hw_gpio_init()`/`Hw_WDT_Cfg`。它似乎是 APP 工程共享的代码——修改前请确认它是否真的参与 boot loader 编译。
 9. **`LTE_READ_CHUNK_SIZE = 40960`**：40KB 的缓冲区（加上 2KB 传输层行队列）约占 SRAM 的 35%（APM32E103RE 为 128KB，IRAM 已配置全片）。未先检查链接器 map 之前不要增大。完整构建的 ZI-data 约 45KB。
 10. **Keil 工程是构建真相**：没有 Makefile。源文件包含、头文件路径、编译器宏全部配置在 `.uvprojx` XML 中。增删文件时必须同步更新工程文件。
 11. **编码不匹配风险**：C 源文件为 GBK 编码。如果用 UTF-8 编辑器编辑，中文注释会乱码。`.c`/`.h` 文件保持 GBK；CLAUDE.md 为 UTF-8。新模块文件（hw_uart3、at_transport、at_file_ops、lte_modem、upgrade_ctrl）使用英文注释以避免此问题。
 12. **新增 4G 模块型号**：创建一个新的 `LTE_MODEM_CFG_T` 常量（如 `LTE_MODEM_CFG_XXX`）并传给 `lte_modem_init()` 即可——除非 AT 文件 API 有差异，否则无需其他改动。
+13. **4G 模块硬件控制（与 Collector-4G 参考工程硬件相同，2026-08 实测确认）**：
+    - **PB1 → 4G_PWR-EN（LDO 使能）：高电平 = 开电**。`modem_power_cycle` 必须"先拉低（关）→ 再拉高（开）并保持高"。曾因极性写反（拉高后拉低保持 = 上电即断电）导致长时间 "modem no RDY"
+    - **PC0 → PCIE_RESET：须保持高电平 = 模组运行态**。`lte_modem_init()` 上电前先置 PC0 高，此后一直保持；不控制此引脚模块会停在复位态
+    - **USART3 = PB10/PB11 默认映射，无需重映射**。注意别与 Collector-4G 参考工程的 UART4（PC10/PC11，GPS 相关）混淆
+    - **RDY 后延迟约 1500ms 再发 AT**：RDY 只是 UART 就绪信号，AT 通道尚未就绪时首条 AT（ATE0）会被吞（参考工程实测 500ms 不够）

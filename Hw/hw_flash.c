@@ -1,7 +1,41 @@
 
 #include "main.h"
+#include "iap.h"
+#include "apm32e10x_iwdt.h"
 
 
+
+/* copy size bytes from src flash to dst flash (no overlap allowed);
+ * dst is erased page-aligned first, source is read via direct pointer
+ * between FMC operations (same pattern as flash_write_with_wdt);
+ * IWDT refreshed per page (page erase+write ~ 50-100ms, WDT ~15s) */
+int32_t hw_flash_copy(uint32_t srcAddr, uint32_t dstAddr, uint32_t size)
+{
+  uint32_t copy_len = (size + FLASH_PAGE_SIZE - 1U) & (~(FLASH_PAGE_SIZE - 1U));
+  uint32_t offset = 0U;
+
+  while(offset < copy_len)
+  {
+    IWDT_Refresh();
+    /* hw_flash_write() relocks the FMC when it returns, so unlock again
+     * before each page erase. Erasing while locked fails silently and the
+     * subsequent write ANDs the new data into the stale page - this
+     * corrupted the 0xAA rollback target (backup->run), while preserve
+     * (run->backup) worked only because the backup area was blank 0xFF. */
+    FMC_Unlock();
+    if(FMC_ErasePage(dstAddr + offset) != FMC_STATUS_COMPLETE)
+    {
+      FMC_Lock();
+      return -1;
+    }
+    (void)hw_flash_write(dstAddr + offset, (const void *)(srcAddr + offset),
+                         FLASH_PAGE_SIZE);
+    offset += FLASH_PAGE_SIZE;
+  }
+  FMC_Lock();
+  IWDT_Refresh();
+  return 0;
+}
 
 
 int32_t hw_flash_erase(uint32_t addrStart, uint32_t size)
@@ -31,7 +65,7 @@ int32_t hw_flash_write(uint32_t addrStart, const void *pdata, uint32_t size)
 {
   const uint8_t *p = (const uint8_t *)pdata;
   uint32_t offset = 0U;
-  uint32_t word = 0xFFFFFFFFU; /* Î²×Ö½Ú°´²Á³ýÌ¬0xFF²¹Æë£¬±ÜÃâÐ´ÈëÔàÊý¾Ý */
+  uint32_t word = 0xFFFFFFFFU; /* Î²ï¿½Ö½Ú°ï¿½ï¿½ï¿½ï¿½ï¿½Ì¬0xFFï¿½ï¿½ï¿½ë£¬ï¿½ï¿½ï¿½ï¿½Ð´ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ */
 
   FMC_Unlock();
   while(offset < size)
@@ -61,7 +95,7 @@ int32_t hw_flash_read(uint32_t addrStart, void *pdata, uint32_t size)
   uint8_t *p = (uint8_t *)pdata;
   while(size--)
   {
-    *p++ = (*(__IO uint8_t*) addrStart++);  // ¶ÁÖ¸¶¨µØÖ·µÄÒ»¸öÊý¾Ý
+    *p++ = (*(__IO uint8_t*) addrStart++);  // ï¿½ï¿½Ö¸ï¿½ï¿½ï¿½ï¿½Ö·ï¿½ï¿½Ò»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 //    addrStart += 1;
   }
   return 0;

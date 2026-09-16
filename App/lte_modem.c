@@ -14,10 +14,17 @@
 
 #include <string.h>
 
-/* module power-on control pin (low level powers the module on) */
+/* module power-on control pin: PB1 -> 4G_PWR-EN (LDO enable),
+ * high level = power on, low level = power off (measured polarity) */
 static HW_GPIO_INIT_T s_modem_power_cfg = { RCM_APB2_PERIPH_GPIOB, GPIOB,
                                             GPIO_PIN_1, GPIO_SPEED_10MHz,
                                             GPIO_MODE_OUT_PP };
+
+/* 4G module PCIE_RESET control pin: PC0, keep high = module running
+ * (measured polarity, must stay high while powered; same as Collector-4G) */
+static HW_GPIO_INIT_T s_modem_rst_cfg = { RCM_APB2_PERIPH_GPIOC, GPIOC,
+                                          GPIO_PIN_0, GPIO_SPEED_10MHz,
+                                          GPIO_MODE_OUT_PP };
 
 static const LTE_MODEM_CFG_T *s_cfg = NULL;
 
@@ -41,10 +48,10 @@ static void modem_power_cycle(uint32_t hold_ms)
 {
   hw_gpio_init(s_modem_power_cfg);
 
-  /* high, then low: low level triggers module power-on */
-  s_modem_power_cfg.port->BSC = s_modem_power_cfg.pin;
-  Delay_ms(hold_ms);
+  /* low (power off) -> high (power on, stay high) */
   s_modem_power_cfg.port->BC = s_modem_power_cfg.pin;
+  Delay_ms(hold_ms);
+  s_modem_power_cfg.port->BSC = s_modem_power_cfg.pin;
 }
 
 static int32_t modem_wait_rdy(const LTE_MODEM_CFG_T *cfg)
@@ -84,16 +91,27 @@ int32_t lte_modem_init(const LTE_MODEM_CFG_T *cfg)
   /* register UART3 callbacks and reset rx state */
   at_transport_init();
 
+  /* release the module reset before powering up: PC0 high = module
+   * running (must be kept high while powered, same as Collector-4G) */
+  hw_gpio_init(s_modem_rst_cfg);
+  s_modem_rst_cfg.port->BSC = s_modem_rst_cfg.pin;
+
   for(attempt = 0U; attempt <= cfg->rdy_retry_count; attempt++)
   {
     modem_power_cycle(cfg->power_cycle_hold_ms);
 
     if(modem_wait_rdy(cfg) != LTE_MODEM_ERR_OK)
     {
+      /* loop runs rdy_retry_count + 1 times (first try + retries) */
       printf("modem no RDY, retry %d/%d\r\n",
-             (int)(attempt + 1U), (int)cfg->rdy_retry_count);
+             (int)(attempt + 1U), (int)(cfg->rdy_retry_count + 1U));
       continue;
     }
+
+    /* RDY is just the UART-ready signal; the AT channel needs a moment
+     * to settle. Sending the first AT too early gets swallowed (learned
+     * in the Collector-4G project: RDY + 1500ms, 500ms was too short). */
+    Delay_ms(1500);
 
     if(modem_at_channel_check() == LTE_MODEM_ERR_OK)
     {
@@ -101,7 +119,7 @@ int32_t lte_modem_init(const LTE_MODEM_CFG_T *cfg)
       return LTE_MODEM_ERR_OK;
     }
     printf("modem AT check failed, retry %d/%d\r\n",
-           (int)(attempt + 1U), (int)cfg->rdy_retry_count);
+           (int)(attempt + 1U), (int)(cfg->rdy_retry_count + 1U));
   }
 
   printf("modem init failed: no RDY!\r\n");
