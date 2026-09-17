@@ -49,7 +49,7 @@
 //#define SYSTEM_CLOCK_120MHz  (120000000)
 
 /* #define VECT_TAB_SRAM */
-#define VECT_TAB_OFFSET     0x00
+#define VECT_TAB_OFFSET     0x3000
 
 /**@} end of group System_Macros */
 

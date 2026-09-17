@@ -16,7 +16,7 @@ int32_t hw_flash_copy(uint32_t srcAddr, uint32_t dstAddr, uint32_t size)
 
   while(offset < copy_len)
   {
-    IWDT_Refresh();
+    WDT_FEED();
     /* hw_flash_write() relocks the FMC when it returns, so unlock again
      * before each page erase. Erasing while locked fails silently and the
      * subsequent write ANDs the new data into the stale page - this
@@ -33,7 +33,7 @@ int32_t hw_flash_copy(uint32_t srcAddr, uint32_t dstAddr, uint32_t size)
     offset += FLASH_PAGE_SIZE;
   }
   FMC_Lock();
-  IWDT_Refresh();
+  WDT_FEED();
   return 0;
 }
 

@@ -10,7 +10,13 @@
  *                        region and verify its CRC
  *                - 0xAA: copy the backup region back to the run region
  *              Every copy/erase/write is verified by CRC afterwards;
- *              all long-running loops refresh the IWDT.
+ *              all long-running loops feed the external WDT (PB0 toggle).
+ *
+ * 2026-09-17 三层架构改造：
+ *   · trial 自动回退取消 -> status 结果回传（见 iap.h UPGRADE_STATUS_*）
+ *   · 安装成功后删除模组 UFS 里的固件，防止下次兜底安装装回旧版本
+ *   · 备份成功后立即落盘 fw[1]，堵住"下载中途掉电丢回退能力"的窗口
+ *   · 裸 NVIC_SystemReset() 全部消灭：无法自愈的故障改为 upgrade_park()
  */
 
 #include "main.h"
@@ -40,12 +46,12 @@ static int32_t flash_erase_with_wdt(uint32_t addr, uint32_t size)
   FMC_Unlock();
   while(offset < erase_len)
   {
-    IWDT_Refresh();
+    WDT_FEED();
     FMC_ErasePage(addr + offset);
     offset += FLASH_PAGE_SIZE;
   }
   FMC_Lock();
-  IWDT_Refresh();
+  WDT_FEED();
   return 0;
 }
 
@@ -61,11 +67,11 @@ static int32_t flash_write_with_wdt(uint32_t addr, const uint8_t *data, uint32_t
     {
       chunk = FLASH_PAGE_SIZE;
     }
-    IWDT_Refresh();
+    WDT_FEED();
     (void)hw_flash_write(addr + offset, data + offset, chunk);
     offset += chunk;
   }
-  IWDT_Refresh();
+  WDT_FEED();
   return 0;
 }
 
@@ -77,12 +83,12 @@ static void upgrade_recover_wait_with_wdt(uint32_t wait_ms)
 
   for(wait_cnt = 0U; wait_cnt < wait_ms; wait_cnt++)
   {
-    IWDT_Refresh();
+    WDT_FEED();
     at_flush_rx();
     Delay_ms(1);
   }
   at_flush_rx();
-  IWDT_Refresh();
+  WDT_FEED();
 }
 
 /* abort the upgrade and boot the current run-region firmware;
@@ -96,9 +102,23 @@ static void upgrade_recover_wait_with_wdt(uint32_t wait_ms)
 static void upgrade_abort(void)
 {
   printf("upgrade abort, boot current firmware\r\n");
-  upgrade.status = UPGRADE_STATUS_OK;
-  upgrade.up_count = 0U;
-  iap_upgrade_state_save(0xFF, 0, 1);
+  /* 本次升级未能实施（参数坏 / 模组起不来 / 保底复制失败 / 写越界）——
+   * 运行区未被新固件触碰，但云端毕竟下发过升级，报 FAILED 让它知道。
+   * APP 侧只能靠 status 判定结果（flag 会被它的 hw_board_init 规范化）。 */
+  iap_upgrade_state_save(0xFF, UPGRADE_STATUS_FAILED);
+}
+
+/* 终止态：无法自愈的故障（Flash 写失败等）。
+ * 绝不复位 —— 复位后引导区按同样的判据会再次把我们送进来，形成无限复位环。
+ * 停留期间持续喂狗，让设备停在可诊断、可现场服务状态。 */
+static void upgrade_park(void)
+{
+  printf("[upgrade-boot] PARK - unrecoverable, manual service required\r\n");
+  while(1)
+  {
+    WDT_FEED();
+    Delay_ms(500);
+  }
 }
 
 /* ① preserve: copy the run region into the backup region before touching it.
@@ -109,11 +129,41 @@ static int32_t upgrade_preserve_backup(const UPGRADE_CTX_T *ctx)
 {
   uint32_t crc = 0U;
 
-  /* run region invalid → keep whatever the backup already holds */
-  if(!FW_VALID(&upgrade.fw[0]) ||
-     (CRC32((uint8_t *)ctx->run_addr, upgrade.fw[0].size) != upgrade.fw[0].crc))
+  /* ---- 情况①：A 槽无元数据记录 ----
+   * 分两种：
+   *   (a) B 有记录 → 这台设备升级过，A 无记录说明运行区确实没装好，
+   *       保留 B 不动（原行为）。
+   *   (b) B 也无记录 → 产线 J-Link 直烧后的首次升级。直接跳过就"没有
+   *       回退点"：新固件若有问题，B 空 + 模组 UFS 已删 → 只能 production
+   *       park 现场救。所以只要 A 槽向量表合法，就按【整槽长度】补录一份
+   *       fw[0] 当"最后已知良好"，再走下面的拷贝。
+   *       代价：size 记成 APP_MAX_SIZE，之后每次启动的 CRC 覆盖整槽 214KB
+   *       （而非实际镜像长度），约多 80ms —— 首次 OTA 提交后会被云端下发的
+   *       真实 size 覆盖回去。 */
+  if(!FW_VALID(&upgrade.fw[0]))
   {
-    printf("run region invalid, skip preserve\r\n");
+    if(FW_VALID(&upgrade.fw[1]))
+    {
+      printf("run region has no record, keep backup\r\n");
+      return 0;
+    }
+
+    if(!iap_vector_ok(ctx->run_addr, ctx->run_addr + APP_MAX_SIZE))
+    {
+      printf("run region invalid, skip preserve\r\n");
+      return 0;
+    }
+
+    printf("no metadata at all, adopt run region as last-known-good\r\n");
+    WDT_FEED();
+    upgrade.fw[0].size = APP_MAX_SIZE;
+    upgrade.fw[0].crc  = CRC32((uint8_t *)ctx->run_addr, APP_MAX_SIZE);
+    WDT_FEED();
+  }
+  /* ---- 情况②：有记录但内容对不上 → 运行区确实坏了，保留 B 不动 ---- */
+  else if(CRC32((uint8_t *)ctx->run_addr, upgrade.fw[0].size) != upgrade.fw[0].crc)
+  {
+    printf("run region crc mismatch, skip preserve\r\n");
     return 0;
   }
 
@@ -127,7 +177,7 @@ static int32_t upgrade_preserve_backup(const UPGRADE_CTX_T *ctx)
   }
 
   printf("preserve: copy run -> backup\r\n");
-  IWDT_Refresh();
+  WDT_FEED();
   (void)hw_flash_copy(ctx->run_addr, ctx->backup_addr, upgrade.fw[0].size);
 
   crc = CRC32((uint8_t *)ctx->backup_addr, upgrade.fw[0].size);
@@ -137,9 +187,15 @@ static int32_t upgrade_preserve_backup(const UPGRADE_CTX_T *ctx)
     return -1;
   }
 
-  /* backup region now holds the previous version; persisted at commit */
+  /* backup region now holds the previous version */
   upgrade.fw[1].size = upgrade.fw[0].size;
   upgrade.fw[1].crc  = upgrade.fw[0].crc;
+
+  /* 立即落盘，不能等到 commit：下载阶段若掉电，B 槽内容已经换成新版本，
+   * 而 fw[1] 若还停在更早的元数据，引导区会判 B 不可用 —— 回退能力静默
+   * 丧失（trial 取消后，回退是唯一的安全网，这个窗口必须堵上）。
+   * 此时 flag 仍是 0x3A，写回是幂等的。 */
+  iap_state_save();
   return 0;
 }
 
@@ -197,7 +253,7 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
              (int)(dl_retry + 1U), (int)UPGRADE_MAX_DL_RETRIES);
 
       /* erase run region before download */
-      IWDT_Refresh();
+      WDT_FEED();
       (void)flash_erase_with_wdt(ctx->run_addr, ctx->expect_size);
 
       /* open file and validate size */
@@ -276,25 +332,37 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
       crc = CRC32((uint8_t *)ctx->run_addr, ctx->expect_size);
       printf("up crc:0x%X\r\n", (unsigned int)crc);
 
-      if(crc == ctx->expect_crc)
+      /* expect_crc == 0 表示调用方无元数据可比对（如从模组 UFS 直接安装），跳过校验 */
+      if((ctx->expect_crc == 0U) || (crc == ctx->expect_crc))
       {
         printf("up file crc ok!\r\n");
+
+        /* 提交前最后一道：向量表 sanity。
+         * 专治"模组 UFS 里的固件与槽地址不匹配"——CRC 自洽（我们算的就是它自己），
+         * 但复位向量指向别处，装进去根本跑不起来：引导区判无效 -> 又跳回升级 boot
+         * -> 又从 UFS 装同一份 -> 无限重装环。必须在这里断掉。
+         * 实测案例：UFS 里躺着旧架构（链接在 0x08006000）的镜像。 */
+        if(!iap_vector_ok(ctx->run_addr, ctx->run_addr + ctx->expect_size))
+        {
+          printf("image vector check FAILED (link address mismatch?)\r\n");
+          WDT_FEED();
+          /* 这份固件不可用：删掉它，否则下次上电还会再装一遍 */
+          (void)at_file_delete(UPGRADE_FILE_NAME);
+          upgrade_abort();   /* 不返回：复位后落到 production park */
+        }
 
         /* commit: the run region holds the new firmware */
         upgrade.fw[0].size = ctx->expect_size;
         upgrade.fw[0].crc  = crc;
-        upgrade.fw_flag = 1U;
-        if(upgrade.status == UPGRADE_STATUS_TRIAL)
-        {
-          /* APP requested trial protection: counted down on each boot */
-          upgrade.up_count = UPGRADE_TRIAL_LIMIT;
-        }
-        else
-        {
-          upgrade.status = UPGRADE_STATUS_OK;
-          upgrade.up_count = 0U;
-        }
-        iap_upgrade_state_save(0x5A, upgrade.up_count, 1);
+        upgrade.fw_flag    = 1U;
+
+        /* 注意：安装成功后【不删】模组 UFS 里的固件。
+         * 文件生命周期 = 下载前删旧 -> 下载新 -> 安装 -> 保留至下次下载。
+         * 保留的好处：A/B 双坏时 UFS 里还有一份可用的恢复源；
+         * APP 每次下载前（app_ota.c 的 Step 1）会 QFDEL 清掉旧的，
+         * 所以既不会积累，也不会把陈旧固件当成恢复源。 */
+
+        iap_upgrade_state_save(0x5A, UPGRADE_STATUS_OK);
       }
 
       printf("up file crc mismatch, retry %d/%d\r\n",
@@ -309,9 +377,15 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
       /* the backup region holds the last-known-good (preserve step);
        * schedule a local rollback on the next boot */
       printf("download retries exhausted, schedule rollback\r\n");
-      upgrade.status = UPGRADE_STATUS_OK;
-      upgrade.up_count = 0U;
-      iap_upgrade_state_save(0xAA, 0, 0);
+
+      /* 这份固件已证明装不上（连读两遍都失败）—— 删掉它。
+       * 不删的话：A/B 双坏时引导区会一直把升级 boot 送回来重装同一份
+       * 坏件，每轮 ~60s 的模组初始化 + 下载，无限循环。删完下一轮 UFS
+       * 探测就找不到文件 -> production park 终止。云端可随时重推。 */
+      WDT_FEED();
+      (void)at_file_delete(UPGRADE_FILE_NAME);
+
+      iap_upgrade_state_save(0xAA, UPGRADE_STATUS_FAILED);
     }
   }
   else
@@ -320,13 +394,15 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
     if(!FW_VALID(&upgrade.fw[1]) ||
        (CRC32((uint8_t *)ctx->backup_addr, upgrade.fw[1].size) != upgrade.fw[1].crc))
     {
-      printf("AA backup crc mismatch, reset\r\n");
-      NVIC_SystemReset();
+      /* 备份槽本身不可用。按设计 iap_init() 已在进来之前用 bak_ok 挡掉，
+       * 走到这里说明状态在运行中被破坏 —— 没有可做的动作，park。 */
+      printf("AA backup crc mismatch\r\n");
+      upgrade_park();
     }
 
     while(app_retry < UPGRADE_MAX_APP_RETRIES)
     {
-      IWDT_Refresh();
+      WDT_FEED();
       (void)hw_flash_copy(ctx->backup_addr, ctx->run_addr, upgrade.fw[1].size);
 
       crc = CRC32((uint8_t *)ctx->run_addr, upgrade.fw[1].size);
@@ -337,10 +413,9 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
         printf("rollback ok!\r\n");
         upgrade.fw[0].size = upgrade.fw[1].size;
         upgrade.fw[0].crc  = upgrade.fw[1].crc;
-        upgrade.fw_flag = 1U;
-        upgrade.status = UPGRADE_STATUS_OK;
-        upgrade.up_count = 0U;
-        iap_upgrade_state_save(0x5A, 0, 1);
+        upgrade.fw_flag    = 1U;
+        /* 回退成功 = 本次升级最终失败：云端视角"掉回旧版本"就是升级失败 */
+        iap_upgrade_state_save(0x5A, UPGRADE_STATUS_FAILED);
       }
 
       printf("app crc mismatch, retry %d/%d\r\n",
@@ -348,8 +423,9 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
       app_retry++;
     }
 
-    /* copy retries exhausted: keep the 0xAA flag and retry on next boot */
-    printf("rollback write retries exhausted, reset\r\n");
-    NVIC_SystemReset();
+    /* 拷贝重试耗尽：B 好但写不进 A —— Flash 硬故障，复位多少次结果都一样，
+     * 保留 0xAA 让下次启动重试只会形成无限复位环。park。 */
+    printf("rollback write retries exhausted\r\n");
+    upgrade_park();
   }
 }

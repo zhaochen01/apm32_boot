@@ -255,7 +255,7 @@ int32_t at_wait(const char *target, AT_MATCH_MODE_T mode, uint32_t timeout_ms)
       return AT_ERR_TIMEOUT;
     }
 
-    IWDT_Refresh();
+    WDT_FEED();
     Delay_ms(1);
   }
 }
@@ -352,7 +352,7 @@ int32_t at_wait_raw_done(uint32_t timeout_ms, uint32_t *actual_len)
       return AT_ERR_TIMEOUT;
     }
 
-    IWDT_Refresh();
+    WDT_FEED();
     Delay_ms(1);
   }
 }

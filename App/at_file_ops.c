@@ -254,3 +254,19 @@ int32_t at_file_close(AT_FILE_CTX_T *ctx)
   ctx->is_open = 0U;
   return (ret == AT_ERR_OK) ? AT_FILE_ERR_OK : AT_FILE_ERR_CLOSE;
 }
+
+int32_t at_file_delete(const char *filename)
+{
+  char cmd[64];
+  int32_t ret;
+
+  if(filename == NULL)
+  {
+    return AT_FILE_ERR_PARAM;
+  }
+
+  (void)snprintf(cmd, sizeof(cmd), "AT+QFDEL=\"%s\"\r\n", filename);
+  ret = at_send_wait(cmd, "OK", AT_MATCH_EXACT, AT_FILE_DELETE_TIMEOUT_MS);
+
+  return (ret == AT_ERR_OK) ? AT_FILE_ERR_OK : AT_FILE_ERR_DELETE;
+}

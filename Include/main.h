@@ -73,15 +73,19 @@ typedef struct
 
 
 
-typedef  void (*pFunction)(void);
-
 /* extern variables */
 extern volatile uint32_t tick;
-extern pFunction Jump_To_Application;
-extern uint32_t JumpAddress;
 
 void hw_gpio_init( HW_GPIO_INIT_T gpio_cfg);
-void Jump_to_App(uint32_t address);
+
+/* 外部看门狗喂狗：PB0 电平翻转（与 APP 侧 hard_wdt_set 同语义）
+ * 2026-09-16 改造：原由 TMR5 中断喂狗，改为长操作中主动喂——
+ * 中断喂会导致主流程卡死时狗照样被喂，失去保护意义。 */
+extern HW_GPIO_INIT_T Hw_WDT_Cfg;
+#define WDT_FEED()   (Hw_WDT_Cfg.port->ODATA ^= Hw_WDT_Cfg.pin)
+
+/* 2026-09-17：Jump_to_App() / JumpAddress / Jump_To_Application / pFunction
+ * 全部删除 —— 新架构下跳 APP 由引导区负责，升级 boot 不再持有跳转实现。 */
 
 
 

@@ -22,3 +22,7 @@ Obj*/
 
 # build log
 MDK/build.log
+
+# 构建日志
+*.log
+build_boot_log.txt

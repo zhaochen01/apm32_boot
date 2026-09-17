@@ -44,13 +44,27 @@ const LTE_MODEM_CFG_T LTE_MODEM_CFG_EC800 =
   .rdy_pattern         = "RDY"
 };
 
+/* 分段延时并喂狗：长延时期间若不给外部 WDT 喂食会被 NRST 复位。
+ * 2026-09-16 新增——原 Delay_ms(hold_ms)/Delay_ms(1500) 期间完全不喂，
+ * 1500ms 已逼近典型 WDT 超时窗口。 */
+static void delay_feed(uint32_t ms)
+{
+  while(ms > 0U)
+  {
+    uint32_t step = (ms > 100U) ? 100U : ms;
+    WDT_FEED();
+    Delay_ms(step);
+    ms -= step;
+  }
+}
+
 static void modem_power_cycle(uint32_t hold_ms)
 {
   hw_gpio_init(s_modem_power_cfg);
 
   /* low (power off) -> high (power on, stay high) */
   s_modem_power_cfg.port->BC = s_modem_power_cfg.pin;
-  Delay_ms(hold_ms);
+  delay_feed(hold_ms);
   s_modem_power_cfg.port->BSC = s_modem_power_cfg.pin;
 }
 
@@ -111,7 +125,7 @@ int32_t lte_modem_init(const LTE_MODEM_CFG_T *cfg)
     /* RDY is just the UART-ready signal; the AT channel needs a moment
      * to settle. Sending the first AT too early gets swallowed (learned
      * in the Collector-4G project: RDY + 1500ms, 500ms was too short). */
-    Delay_ms(1500);
+    delay_feed(1500);
 
     if(modem_at_channel_check() == LTE_MODEM_ERR_OK)
     {

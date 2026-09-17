@@ -30,7 +30,8 @@
 #include "hw_uart.h"
 #include "upgrade_ctrl.h"
 
-#include "apm32e10x_iwdt.h"
+#include "at_file_ops.h"
+#include "lte_modem.h"
 
 #include "iap.h"
 
@@ -52,8 +53,8 @@ HW_GPIO_INIT_T Hw_DATA_Cfg = { RCM_APB2_PERIPH_GPIOC, GPIOC, GPIO_PIN_7, GPIO_SP
 HW_GPIO_INIT_T Hw_SIM_Cfg = { RCM_APB2_PERIPH_GPIOC, GPIOC, GPIO_PIN_9, GPIO_SPEED_10MHz, GPIO_MODE_OUT_PP };
 
 
-uint32_t JumpAddress;
-pFunction Jump_To_Application;
+/* JumpAddress / Jump_To_Application 已于 2026-09-17 随 Jump_to_App() 一并删除：
+ * 新架构下跳 APP 由引导区负责，本工程不再有第二套跳转实现。 */
 
 
 
@@ -94,7 +95,6 @@ void TMR5_IRQHandler(void)
 //    printf("tim5!\r\n");
       if( i == 0)
       {
-        Hw_WDT_Cfg.port->BC  = Hw_WDT_Cfg.pin;
         Hw_RUN_Cfg.port->BC  = Hw_RUN_Cfg.pin;
         Hw_DATA_Cfg.port->BC = Hw_DATA_Cfg.pin;
         Hw_SIM_Cfg.port->BC  = Hw_SIM_Cfg.pin;
@@ -102,7 +102,6 @@ void TMR5_IRQHandler(void)
       }
       else
       {
-        Hw_WDT_Cfg.port->BSC  = Hw_WDT_Cfg.pin;
         Hw_RUN_Cfg.port->BSC  = Hw_RUN_Cfg.pin;
         Hw_DATA_Cfg.port->BSC = Hw_DATA_Cfg.pin;
         Hw_SIM_Cfg.port->BSC  = Hw_SIM_Cfg.pin;
@@ -184,9 +183,6 @@ uint32_t CRC32(uint8_t *data, uint32_t length)
  */
 int main(void)
 {
-  int32_t req = -1;
-
-
 	SystemInit();
 	SystemCoreClockUpdate();
   
@@ -207,44 +203,106 @@ int main(void)
   
   printf("\r\nBoot Loader... %s\r\n", VERSION);
   
-  req = iap_init();
-
-  IWDT_EnableWriteAccess();
-  IWDT_ConfigDivider(IWDT_DIVIDER_256);
-  IWDT_ConfigReload(2343);
-  IWDT_Refresh();
-  IWDT_Enable();
-    
-  if(req == 0x3A)
+  /* 2026-09-16：片内 IWDT 已移除——它一旦使能无法软件关闭，跳转 APP 后
+   * 会因无人喂而 15s 复位。看门狗统一由外部 WDT（PB0）承担，
+   * 且改为长操作主动喂（见 WDT_FEED），保证主流程卡死时能复位。 */
   {
     UPGRADE_CTX_T ctx;
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.action = UPGRADE_ACTION_NETWORK;
-    ctx.run_addr = upgrade_cfg.app_addr;
-    ctx.backup_addr = upgrade_cfg.fw1_addr;
-    ctx.expect_size = upgrade.size;
-    ctx.expect_crc = upgrade.crc;
-    upgrade_run(&ctx);
-  }
-  else if((req == 0xAA) || (req == UPGRADE_ACTION_AUTO_ROLLBACK))
-  {
-    /* 0xAA: APP requested local rollback
-     * 0x5B: boot-time verification failed or trial exhausted → auto rollback */
-    UPGRADE_CTX_T ctx;
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.action = UPGRADE_ACTION_ROLLBACK;
-    ctx.run_addr = upgrade_cfg.app_addr;
-    ctx.backup_addr = upgrade_cfg.fw1_addr;
-    ctx.expect_size = upgrade.fw[1].size;
-    ctx.expect_crc = upgrade.fw[1].crc;
-    upgrade_run(&ctx);
+    int32_t act = iap_init(&ctx);   /* ctx 带回安装参数；返回码见 iap.h IAP_ACT_* */
+
+    if(act == IAP_ACT_INSTALL)
+    {
+      upgrade_run(&ctx);            /* 内部完成安装并复位，永不返回 */
+      /* 真返回了（不该发生）—— 不猜，直接 park */
+      printf("[upgrade-boot] unexpected: upgrade_run returned\r\n");
+      act = IAP_ACT_PARK;
+    }
+
+    if(act == IAP_ACT_RESUME_APP)
+    {
+      /* APP 有效、flag 已被 iap_init 改成稳态 -> 复位交回引导区。
+       * 复位是终止性的：flag 变了，引导区的下一次决策必然不同。 */
+      printf("[upgrade-boot] APP ready, hand back to bootstrap\r\n");
+      NVIC_SystemReset();
+    }
+
+    if(act != IAP_ACT_PARK)
+    {
+      /* ---- 无可用固件：去模组 UFS 找升级程序（生产阶段的判断依据） ---- */
+      uint32_t ufs_sz = 0U;
+
+      printf("[upgrade-boot] checking module UFS...\r\n");
+
+      if(lte_modem_init(&LTE_MODEM_CFG_EG800K) == 0)
+      {
+        AT_FILE_CTX_T f;
+        int32_t r = at_file_open(&f, UPGRADE_FILE_NAME);
+
+        if(r == AT_FILE_ERR_OK)
+        {
+          r = at_file_get_size(&f);
+          if(r == AT_FILE_ERR_OK)
+          {
+            ufs_sz = f.file_size;
+            printf("[upgrade-boot] module file %s size=%lu\r\n", UPGRADE_FILE_NAME,
+                   (unsigned long)ufs_sz);
+          }
+          else
+          {
+            printf("[upgrade-boot] QFLST failed, ret=%d\r\n", (int)r);
+          }
+          (void)at_file_close(&f);      /* 用完即关，upgrade_run 会重新打开 */
+        }
+        else
+        {
+          /* 打不开 = 模组 UFS 里没有这个文件。这是"模块里没固件"的唯一线索，
+           * 之前静默跳过，现场只能看到 UFS file size=0，无法区分
+           * "文件不存在" 与 "AT 通道失败"。 */
+          printf("[upgrade-boot] no firmware on module (open ret=%d)\r\n", (int)r);
+        }
+      }
+      else
+      {
+        printf("[upgrade-boot] modem init FAILED - cannot check UFS\r\n");
+      }
+
+      if((ufs_sz > 0U) && (ufs_sz <= APP_MAX_SIZE))
+      {
+        UPGRADE_CTX_T uctx;
+        memset(&uctx, 0, sizeof(uctx));
+        uctx.action      = UPGRADE_ACTION_NETWORK;
+        uctx.run_addr    = upgrade_cfg.app_addr;
+        uctx.backup_addr = upgrade_cfg.fw1_addr;
+        uctx.expect_size = ufs_sz;
+
+        /* 有元数据可比对就全量校验；否则退化为"只看大小"并告警。
+         * 模组 UFS 里的文件若损坏（写入中断 / 位翻转），零校验会把它原样
+         * 装进 APP —— 而 fw[0] 记录的就是这段内容的 CRC，引导区之后自然
+         * 校验通过，于是一个被截断的镜像会被当成好固件跳进去。 */
+        if((ufs_sz == upgrade.size) &&
+           (upgrade.crc != 0U) && (upgrade.crc != 0xFFFFFFFFU))
+        {
+          uctx.expect_crc = upgrade.crc;
+        }
+        else
+        {
+          uctx.expect_crc = 0U;
+          printf("[upgrade-boot] WARN: no metadata, size-only check\r\n");
+        }
+        upgrade_run(&uctx);           /* 内部完成安装并复位，不返回 */
+      }
+    }
   }
 
-  NVIC_SystemReset();
+  /* 生产阶段（空板）或需人工介入 —— 提示并停留等待烧录。
+   * 停留期间持续喂狗：此循环的存续本身即"未卡死"。
+   * 绝不复位 —— 复位会与引导区形成环。 */
+  printf("[upgrade-boot] production mode - please flash firmware\r\n");
 
   while(1)
   {
-    Delay_ms(100);
+    WDT_FEED();
+    Delay_ms(500);
   }
 }
 
