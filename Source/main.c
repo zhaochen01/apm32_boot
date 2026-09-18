@@ -34,6 +34,7 @@
 #include "lte_modem.h"
 
 #include "iap.h"
+#include "serial_dl.h"
 
 
 
@@ -228,6 +229,36 @@ int main(void)
 
     if(act != IAP_ACT_PARK)
     {
+      /* ---- 串口下载兜底窗口（2026-09-18）----
+       * 砖机（A/B 都不可用）时引导区【无论有没有收到魔数】都会把我们跳进来
+       * —— 那是它的修复路径。操作员可能忘了发魔数，或者工具接晚了、复位
+       * 按早了。给 8 秒等一条请求行，没人来就继续走原来的模组 UFS 探测。
+       *
+       * 不会和"魔数入口"抢：那条路在上面的 iap_init() 里就返回 SERIAL 了，
+       * 根本到不了这里 —— 这里的窗口纯粹靠请求行本身触发。 */
+      {
+        uint32_t dl_sz = 0U;
+        uint32_t dl_crc = 0U;
+
+        printf("[upgrade-boot] serial download window (%lu ms)...\r\n",
+               (unsigned long)SERIAL_DL_BOOT_WAIT_MS);
+
+        if(serial_dl_wait_request(SERIAL_DL_BOOT_WAIT_MS, &dl_sz, &dl_crc))
+        {
+          UPGRADE_CTX_T sctx;
+
+          memset(&sctx, 0, sizeof(sctx));
+          sctx.action      = UPGRADE_ACTION_SERIAL;
+          sctx.run_addr    = upgrade_cfg.app_addr;
+          sctx.backup_addr = upgrade_cfg.fw1_addr;
+          sctx.expect_size = dl_sz;
+          sctx.expect_crc  = dl_crc;
+
+          printf("[upgrade-boot] serial request caught\r\n");
+          upgrade_run(&sctx);       /* 内部完成安装并复位，永不返回 */
+        }
+      }
+
       /* ---- 无可用固件：去模组 UFS 找升级程序（生产阶段的判断依据） ---- */
       uint32_t ufs_sz = 0U;
 

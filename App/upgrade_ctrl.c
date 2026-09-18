@@ -27,6 +27,7 @@
 #include "iap.h"
 #include "bsp_delay.h"
 #include "ram_flash.h"   /* ram_flash_program()：RAM 常驻的 Flash 擦写例程 */
+#include "serial_dl.h"   /* 串口下载的字节层（USART1 + 请求行 + BAKPR 标志） */
 
 #include <string.h>
 
@@ -155,6 +156,31 @@ static int32_t upgrade_preserve_backup(const UPGRADE_CTX_T *ctx)
    *       真实 size 覆盖回去。 */
   if(!FW_VALID(&upgrade.fw[0]))
   {
+    /* ---- 半写保护（2026-09-18）----
+     * 擦运行区【之前】必须让引导区有能力判它无效。
+     *
+     * fw[0].crc == 0xFFFFFFFF 在引导区 boot_app_valid() 眼里是
+     * "无记录 = 放行"（产线 J-Link 裸烧语义）。走到本块说明 fw[0] 没有
+     * 记录，而下面无论如何都会擦 A 槽 —— 一旦中途掉电，引导区会放行
+     * 半写的 A（第 0 页就是新镜像的向量表，必然通过它的向量表检查）->
+     * 执行到 0xFF -> HardFault -> NRST -> 复位环；且此时 app != 0，
+     * 引导区永远跳 APP，升级 boot 再也进不去 —— 串口救援都够不着。
+     *
+     * 写一条不可能匹配的占位记录：crc=0 与真实 CRC32 撞上的概率 2^-32。
+     * 装成功时会被真实值覆盖；装失败时正好让 A 被判无效、走回退路径。
+     * 两侧判据同构（iap.c 的 slot_usable 与引导区 boot_app_valid 都是
+     * "crc != 0xFFFFFFFF 就做全量 CRC 比对"），不会产生判据漂移。
+     *
+     * 【必须放在本块最前面，不能只放在下面"向量表无效"那条分支里】：
+     * (a) 分支（B 有记录 -> 保留 B 不动）同样是"fw[0] 无记录 + 接下来要擦
+     * A"，漏了它就等于保护网破了一个口。两条子分支现在同构。
+     *
+     * 用 iap_state_save()（只落盘不复位）—— 复位了就轮不到下面擦写了。
+     * adopt 分支会立刻用真实 CRC 覆盖它，多几十毫秒的代价换覆盖完整。 */
+    upgrade.fw[0].size = ctx->expect_size;
+    upgrade.fw[0].crc  = 0u;
+    iap_state_save();
+
     if(FW_VALID(&upgrade.fw[1]))
     {
       printf("run region has no record, keep backup\r\n");
@@ -164,28 +190,6 @@ static int32_t upgrade_preserve_backup(const UPGRADE_CTX_T *ctx)
     if(!iap_vector_ok(ctx->run_addr, ctx->run_addr + APP_MAX_SIZE))
     {
       printf("run region invalid, skip preserve\r\n");
-
-      /* ---- 半写保护（2026-09-18）----
-       * 擦运行区【之前】必须让引导区有能力判它无效。
-       *
-       * fw[0].crc == 0xFFFFFFFF 在引导区 boot_app_valid() 眼里是
-       * "无记录 = 放行"（产线 J-Link 裸烧语义）。空白板走到这条分支时
-       * A 没有向量表 -> 跳过拷贝且不写任何记录 -> fw[0] 保持 0xFFFFFFFF。
-       * 于是一旦下载中途掉电：引导区放行半写的 A 槽（第 0 页就是新镜像的
-       * 向量表，必然通过它的向量表检查）-> 执行到 0xFF -> HardFault ->
-       * NRST -> 复位环；且此时 app != 0，引导区永远跳 APP，升级 boot 再也
-       * 进不去 —— 串口救援都够不着。
-       *
-       * 写一条不可能匹配的占位记录：crc=0 与真实 CRC32 撞上的概率 2^-32。
-       * 装成功时会被真实值覆盖；装失败时正好让 A 被判无效、走回退路径。
-       * 两侧判据同构（iap.c 的 slot_usable 与引导区 boot_app_valid 都是
-       * "crc != 0xFFFFFFFF 就做全量 CRC 比对"），不会产生判据漂移。
-       *
-       * 用 iap_state_save()（只落盘不复位）—— 复位了就轮不到下面擦写了。 */
-      upgrade.fw[0].size = ctx->expect_size;
-      upgrade.fw[0].crc  = 0u;
-      iap_state_save();
-
       return 0;
     }
 
@@ -385,6 +389,256 @@ static void upgrade_self_run(void)
   for(;;) { }
 }
 
+/* ==================================================================
+ * 串口下载（0x3C）—— 从 USART1（调试口）收镜像写进 APP A 槽
+ *
+ * 协议（PC 侧 = tools/serial_dl.py）：
+ *
+ *   PC   "#DL <size> <crc32>\r\n"（每 100ms 重发，上电前就开）
+ *   DEV  校验 -> 排空 RX -> "#RDY\r\n"
+ *   DEV  preserve（A 备份到 B，214KB 满槽约 7s）
+ *   DEV  排空 RX -> "#GO\r\n"
+ *   PC   第 0 页（≤2048B）
+ *   DEV  擦 1 页 + 写 -> ACK(0x06)
+ *   ...  每页等一个 ACK ...
+ *   PC   末页（可不足 2048B）
+ *   DEV  擦 1 页 + 写 -> 回读全量 CRC32
+ *   DEV  ACK(0x06) = 提交 + 复位 / NAK(0x15) = 失败
+ *
+ * 【控制字词表】PC 侧接收窗口里混着设备日志（工具先开、板子后上电），
+ * 所以设备的控制信号必须和日志不可能撞：
+ *   · 请求行 / #RDY / #GO 一律带 "#" 前缀
+ *   · ACK / NAK 用 0x06 / 0x15 控制字节，不用 'A'/'C'
+ *   · 任何终止路径上【裁决字节先于日志】（2026-09-18 两次实测各自踩过一条）
+ *
+ * 【为什么按页 ACK 是整个协议的灵魂】
+ * ACK 天然制造"PC 一定不在发数据"的窗口，擦除/写入全塞进这个窗口 ->
+ * 1 字节接收寄存器 + 无硬件流控的问题自动消失。反过来：擦一页要
+ * 20~40ms，没有 ACK 的话这段时间正好够 PC 把接收寄存器冲爆。
+ *
+ * 【为什么可以阻塞轮询、不开中断】
+ * 节奏由 ACK 控制，本来就没有并发。轮询循环约 10 cycle/字节，而字节
+ * 间隔 6250 cycle（87us @72MHz）-> 占空比 0.16%。
+ * 不引入 ISR 还避开了一个必须靠手册背书的论证：本工程 USART1 的 RXNE
+ * 中断从不使能（hw_uart.c 的 USART1_Isr 是死代码，只有 USART3 开了中断），
+ * 所以收页路径上没有任何东西会和轮询抢字节。开中断去收反而会引入这个风险。
+ *
+ * 【复用】页缓冲直接用 up_file_buf 的前 2KB（QFDEL/QFREAD 那条路与
+ * 串口互斥，不会同时在跑）-> 新增 RAM = 0。改小 LTE_READ_CHUNK_SIZE
+ * 到 2048 以下会静默踩到这里。
+ *
+ * 【铁律】收页循环内禁止 printf —— 混进一个字节整包就废。
+ * 本函数的 printf 全部在循环之外，或循环内的【终止分支】上。
+ * ================================================================== */
+static void upgrade_serial_run(const UPGRADE_CTX_T *ctx)
+{
+  UPGRADE_CTX_T c = *ctx;
+  uint32_t size = ctx->expect_size;
+  uint32_t crc  = ctx->expect_crc;
+  uint32_t off  = 0u;
+  uint32_t calc = 0u;
+  uint8_t *page = up_file_buf;
+  int32_t  rc;
+
+  /* ---- ① 拿到参数 ----
+   * 砖机入口（main.c 的 UFS 兜底窗口）已经在 ctx 里填好了；引导区
+   * 魔数入口（iap_init 只认 BAKPR 标志，不知道尺寸）要在这里等。 */
+  if(size == 0u)
+  {
+    printf("[serial] waiting for download request...\r\n");
+    if(!serial_dl_wait_request(SERIAL_DL_REQ_TIMEOUT_MS, &size, &crc))
+    {
+      /* 没等到 = 什么都没发生：运行区没被碰过。用 0x5A/NONE 交回引导区
+       * 正常启动，而不是 upgrade_abort() 的 FAILED —— 云端根本没下发过，
+       * 报一次"升级失败"是假消息。
+       *
+       * 【例外】flag 已经是 0x3A / 0x3B 时原样留着并复位：那是一次真实的
+       * 挂起请求（串口标志陈旧、或操作员改了主意），把它改成 0x5A 等于
+       * 直接把云端的 OTA 吞掉 —— 云端收不到任何 upgrade_result，现场只
+       * 看到设备重启一次、版本没变。
+       *
+       * 这里用裸 NVIC_SystemReset() 不违反 iap.c 的不变量 1：导致我们走到
+       * 这里的那个持久状态（BAKPR 串口标志）已经由 iap_init 读后清零，
+       * 下一次启动的决策必然不同，不会成环。若 flag 是 0x3A 但参数不可信
+       * （入口 B 命令填的就是 size=0），iap_init 会走 drop_request 把它
+       * 规范化掉，再复位一次就落到 APP —— 有界。 */
+      if((upgrade.flag == 0x3AU) || (upgrade.flag == 0x3BU))
+      {
+        printf("[serial] no request in time, keep pending upgrade 0x%X\r\n",
+               upgrade.flag);
+        NVIC_SystemReset();
+      }
+
+      printf("[serial] no request in time, hand back\r\n");
+      iap_upgrade_state_save(0x5A, UPGRADE_STATUS_NONE);
+    }
+  }
+  c.expect_size = size;
+  c.expect_crc  = crc;
+
+  printf("[serial] request ok: size=%lu crc=0x%08lX\r\n",
+         (unsigned long)size, (unsigned long)crc);
+
+  /* 标志已由 iap_init 清零；走 main.c 窗口那条路进来时还没清，这里补
+   * 一次（幂等）。不清的话刷完复位又会被送回串口模式。 */
+  rc = serial_dl_take_request();
+  if(rc < 0)
+  {
+    /* 清不掉 -> 刷完也会被再送回来 -> 无限重刷。宁可这次不刷。 */
+    printf("[serial] request flag stuck -> park\r\n");
+    upgrade_park();
+  }
+
+  /* ---- ② 参数落盘（必须在动运行区之前）----
+   * 下载中途掉电时，引导区要靠 flag 判断该走哪条路：0x5A = 无请求 ->
+   * 它判 A 无效后由 B 槽回退接管。写 0x3C 则是给引导区留一个它不认的
+   * 未知值（0x3C 只是本工程的内部动作码，不是升级请求码）。 */
+  upgrade.flag     = 0x5A;
+  upgrade.up_count = 0U;
+  upgrade.size     = size;
+  upgrade.crc      = crc;
+  iap_state_save();   /* 只落盘不复位；写不进去内部 park，不会走到 RDY */
+
+  /* "#" 前缀与请求行同族：这两行会被上位机当控制信号解析，而它的接收
+   * 窗口里混着设备日志（工具先开、板子后上电，复位前 APP 还在打日志）。
+   * 裸 "RDY" 会被 "[.. 4G] RDY confirmed" 这类日志行误命中 —— 2026-09-18
+   * 实测就是这么失败的：工具提前收工、停发魔数，复位时引导区啥也没收到。 */
+  serial_dl_send("#RDY\r\n");
+
+  /* ---- ③ preserve：当前 A -> B（回退源）----
+   * 整条路径最慢的一步（214KB 满槽擦+拷约 7s）。PC 收到 RDY 后已停发，
+   * 所以这里不需要边收边等；但串口上可能还有在途字节，第 ④ 步要排空。 */
+  printf("[serial] preserve run -> backup\r\n");
+  if(upgrade_preserve_backup(&c) != 0)
+  {
+    printf("[serial] preserve failed, abort\r\n");
+    serial_dl_send("#ERR preserve\r\n");
+    upgrade_abort();
+  }
+
+  /* ---- ④ 排空在途字节再放行 ----
+   * PC 在收到 RDY 之前的重发残字节若不清掉，会被当成第 0 页数据写进
+   * Flash 开头 —— 而且 CRC 会"自洽地"错（我们校验的是写进去的东西）。 */
+  serial_dl_flush();
+
+  /* 【顺序不可调】日志必须在 GO 之前 —— GO 是给 PC 的放行信号，它一收到
+   * 就立刻开始灌数据。收页循环开始前任何耗时输出（这句 printf 约 2.6ms）
+   * 都会让 USART 那 1 字节接收寄存器溢出，丢掉头几十字节。 */
+  printf("[serial] receiving %lu bytes\r\n", (unsigned long)size);
+  serial_dl_send("#GO\r\n");
+
+  /* ---- ⑤ 收页循环 ---- */
+  while(off < size)
+  {
+    uint32_t chunk = size - off;
+    int32_t  fres;
+
+    if(chunk > FLASH_PAGE_SIZE) chunk = FLASH_PAGE_SIZE;
+
+    if(serial_dl_recv(page, chunk, SERIAL_DL_RX_TIMEOUT_MS) < 0)
+    {
+      serial_dl_send_byte(SERIAL_DL_NAK);   /* 先回 NAK 再打印，别抢线 */
+      printf("[serial] rx timeout at off=%lu\r\n", (unsigned long)off);
+      upgrade_abort();   /* 运行区半写：引导区判 A 无效 -> B 槽回退接管 */
+    }
+
+    /* 【这里刻意不包 __disable_irq()】
+     * 原计划是"擦+写包在临界区里"，但**那个前提是错的**：SDK 的
+     * FMC_ErasePage / FMC_ProgramWord（apm32e10x_fmc.c:254/283/307/321）
+     * 自己无条件 __set_PRIMASK(1) ... __set_PRIMASK(0)，外层 disable 在
+     * 第一次 FMC 调用返回时就被撤销了 —— 包了也只是个"看起来关了中断"
+     * 的假象，比不包更危险。
+     * Flash 的原子性由 SDK 那两句自己保证（每次擦/写内部真关中断）；
+     * 此刻使能的中断只有 SysTick（加计数）和 TMR5（翻 GPIO），都不碰 FMC。
+     * 与 UFS 那条路（flash_write_with_wdt 直接调用）保持一致。
+     *
+     * 仍然成立的两条铁律：不许 Delay_ms()（它是 SysTick 忙等，真关中断时
+     * 会死等）、不许调用自带 __enable_irq() 的函数改变中断状态。 */
+    fres = flash_erase_with_wdt(c.run_addr + off, FLASH_PAGE_SIZE);
+    if(fres == 0)
+    {
+      fres = flash_write_with_wdt(c.run_addr + off, page, chunk);
+    }
+
+    if(fres != 0)
+    {
+      /* Flash 硬故障：复位多少次结果都一样，park 等现场。 */
+      serial_dl_send_byte(SERIAL_DL_NAK);
+      printf("[serial] flash fail at off=%lu -> park\r\n", (unsigned long)off);
+      upgrade_park();
+    }
+
+    off += chunk;
+
+    /* 末页不回"页 ACK" —— 它的应答就是最终裁决（ACK=已提交 / NAK=失败），
+     * 由下面的 ⑥ 负责。页 ACK 的唯一作用是制造"PC 不在发数据"的静默窗口
+     * 好让擦写安全进行，末页之后没有下一页要收，不需要这个窗口。
+     * 多发一个会让上位机把"页 ACK"当成裁决（CRC 失败也报成功）。 */
+    if(off < size)
+    {
+      serial_dl_send_byte(SERIAL_DL_ACK);
+    }
+  }
+
+  /* ================== 裁决字节先于日志 ==================
+   * 末页之后上位机等的【下一个字节】就是最终裁决（见文件头协议图）。
+   * 任何插在它前面的日志都会被当成裁决 —— 2026-09-18 实测：工具读到了
+   * "[serial] verifying" 的 '[' (0x5B) 当 ACK，61 页全传完却报"协议错位"。
+   *
+   * 所以本函数所有终止路径一律【先发 NAK/ACK，再打印】。下面这两段
+   * 诊断日志刻意排在裁决之后（或干脆并在裁决行里一次出）。 */
+  WDT_FEED();
+  calc = CRC32((uint8_t *)c.run_addr, size);
+
+  /* PC 报的 crc 只是交叉校验；真正说了算的是从刚写进去的 Flash 读回来
+   * 现算 —— 它同时覆盖"PC 发错"和"Flash 写坏"两种故障。 */
+  if(calc != crc)
+  {
+    serial_dl_send_byte(SERIAL_DL_NAK);
+    printf("[serial] crc mismatch: calc=0x%08lX expect=0x%08lX\r\n",
+           (unsigned long)calc, (unsigned long)crc);
+    upgrade_abort();
+  }
+
+  /* 向量表 sanity，与 UFS 路径同款判据：专治"PC 送了一份链接地址不对的
+   * 镜像"。CRC 自洽（我们算的就是它自己），但复位向量指向别处，装进去
+   * 根本跑不起来 -> 引导区判无效 -> 又跳回升级 boot -> 又进串口模式。 */
+  if(!iap_vector_ok(c.run_addr, c.run_addr + size))
+  {
+    serial_dl_send_byte(SERIAL_DL_NAK);
+    printf("[serial] vector check FAILED (wrong link address?)\r\n");
+    upgrade_abort();
+  }
+
+  /* ---- ⑦ 提交 ---- */
+  upgrade.fw[0].size = size;
+  upgrade.fw[0].crc  = calc;
+  upgrade.fw_flag    = 1U;
+  upgrade.flag       = 0x5A;
+  upgrade.status     = UPGRADE_STATUS_OK;
+  upgrade.up_count   = 0U;
+
+  /* url/name 也改掉：它们描述的是"待安装的那份固件"。若不改，串口刷完后
+   * APP 会向云端报 upgrade_result state=3，而元数据里还留着云端那次
+   * set_upgrade 的 url —— 云端会以为自己下发的那份装上了。名称是给人看的，
+   * 顺手留下"这份是串口刷的"这个唯一线索。 */
+  upgrade.url[0] = '\0';
+  (void)strncpy(upgrade.name, "serial", sizeof(upgrade.name) - 1u);
+  upgrade.name[sizeof(upgrade.name) - 1u] = '\0';
+
+  /* 这里刻意【不用】iap_upgrade_state_save()：它落盘后立刻复位，没机会
+   * 回 ACK —— 而 ACK 必须代表"已提交"而不是"正在提交"。拆开两步：
+   * iap_state_save() 自带回读校验，写不进去就 park，绝不会对 PC 撒谎。 */
+  iap_state_save();
+
+  serial_dl_send_byte(SERIAL_DL_ACK);   /* 裁决先出，日志后出（见 ⑥ 的说明） */
+  printf("[serial] committed: size=%lu crc=0x%08lX\r\n",
+         (unsigned long)size, (unsigned long)calc);
+
+  Delay_ms(200);        /* 让 ACK 出完再复位（复位会把 TX 脚打回输入态） */
+  NVIC_SystemReset();
+}
+
 void upgrade_run(const UPGRADE_CTX_T *ctx)
 {
   AT_FILE_CTX_T file_ctx;
@@ -396,6 +650,15 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
   if(ctx == NULL)
   {
     upgrade_abort();
+  }
+
+  /* ================= 串口下载（0x3C）=================
+   * 参数来自 PC 的请求行、不是云端元数据，所以必须排在下面那个
+   * expect_* 校验【之前】—— 那里 expect_size==0 一律判 invalid，
+   * 而引导区魔数入口进来时确实还没有尺寸（要等 PC 报）。 */
+  if(ctx->action == UPGRADE_ACTION_SERIAL)
+  {
+    upgrade_serial_run(ctx);   /* 永不返回 */
   }
 
   /* empty flash reads as 0xFFFFFFFF: reject invalid expectations */
@@ -630,9 +893,9 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
   }
   else
   {
-    /* 未知 action。iap_init() 只产生 NETWORK / SELF / ROLLBACK 三种，而 SELF
-     * 在 upgrade_self_run() 里永不返回 —— 走到这里说明枚举被扩充过而这里
-     * 没跟上。不猜该做什么，park 等现场。 */
+    /* 未知 action。iap_init() 只产生 NETWORK / SELF / SERIAL / ROLLBACK 四种，
+     * 而 SELF 与 SERIAL 在各自的分支里永不返回 —— 走到这里说明枚举被扩充过
+     * 而这里没跟上。不猜该做什么，park 等现场。 */
     printf("unknown action 0x%X -> park\r\n", (int)ctx->action);
     upgrade_park();
   }

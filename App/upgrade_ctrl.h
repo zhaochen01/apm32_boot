@@ -27,11 +27,28 @@
 /* boot 试用计数所在的 BAKPR（引导区读写，APP 清零；升级 boot 写入置 1） */
 #define BOOT_TRIAL_REG        BAKPR_DATA17
 
+/* ---- 串口下载请求标志：引导区写、升级 boot 读后清零（2026-09-18）----
+ * 上位机在上电时发 0x55 0xAA（见 apm32_e103_bootstrap/App/boot_serial.h），
+ * 引导区命中后置本标志再跳升级 boot，boot 据此直接进串口下载模式，
+ * 而不是走 4G 模组那条路。三个工程用的是同一个寄存器与同一个魔数。
+ *
+ * 为什么不写 Upgrade_t.flag：引导区是"Flash 只读"的信任根，写 Flash 会破坏
+ * 这个边界。BAKPR 它本来就在写（试用计数）。
+ *
+ * 【为什么是 DATA18】DATA1~DATA17 已被占满（DATA2~DATA16 = APP 崩溃转储、
+ * DATA17 = boot 试用计数）。曾经选 DATA16，撞上了 APP 的 CRASH_REG_R1_H：
+ * 每次 HardFault 写 r1>>16，约 1/65536 概率等于 0x5A5A，凭空造出一个串口
+ * 请求并且没人清。加寄存器前先全工程 grep 一遍 BAKPR_DATA。
+ * 三处必须一致：本处 / apm32_e103_bootstrap/App/boot.h / IoT-4G-v2/App/app_ota.c */
+#define BOOT_SERIAL_REQ_REG    BAKPR_DATA18
+#define BOOT_SERIAL_REQ_MAGIC  0x5A5Au
+
 typedef enum
 {
   UPGRADE_ACTION_NETWORK  = 0x3A,   /* download from 4G module */
-  UPGRADE_ACTION_ROLLBACK = 0xAA,   /* copy backup region to run region */
-  UPGRADE_ACTION_SELF     = 0x3B    /* boot 自升级：UFS 的新升级 boot 镜像 -> A 槽 */
+  UPGRADE_ACTION_SELF     = 0x3B,   /* boot 自升级：UFS 的新升级 boot 镜像 -> A 槽 */
+  UPGRADE_ACTION_SERIAL   = 0x3C,   /* 串口下载：USART1 收镜像 -> APP A 槽 */
+  UPGRADE_ACTION_ROLLBACK = 0xAA    /* copy backup region to run region */
 } UPGRADE_ACTION_T;
 
 /* upgrade parameters; caller fills before calling upgrade_run() */

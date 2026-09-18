@@ -279,6 +279,86 @@ APP 下载前（app_ota.c Step 1）→ QFDEL 删旧
 
 **槽常量**（与引导区 `App/boot.h`、`tools/postbuild_boot_slot.py`、APP 侧 `IoT-4G-v2/App/app_ota.h`/`app_ota.c` 逐字节一致）：`BOOT_SLOT_SIZE`(24576)、`BOOT_SLOT_MAX_IMAGE`(24564)、`BOOT_A_ADDR`/`BOOT_B_ADDR`、`BOOT_UPDATE_FILE_NAME`(`"UFS:boot_update.bin"`)、`UPGRADE_ACTION_SELF`(0x3B)。
 
+### 串口下载（USART1 调试口刷机，2026-09-18）
+
+不接 J-Link 也能刷 APP：走调试口 USART1，覆盖**产线首刷**和**现场砖机救援**。
+实现分两层——`App/serial_dl.c`（字节层：USART1 收发 + 请求行状态机 + BAKPR 标志，
+**不碰 Flash、不链 stdio**）与 `upgrade_ctrl.c` 的 `upgrade_serial_run()`（状态机：
+preserve / 逐页擦写 / 回读校验 / 提交，复用现成的 `flash_*_with_wdt`、`CRC32`、
+`iap_vector_ok`、`upgrade_preserve_backup`）。
+
+**触发入口（两条，都汇到 `UPGRADE_ACTION_SERIAL = 0x3C`）：**
+
+| 入口 | 位置 | 判据 |
+|---|---|---|
+| A 引导区魔数 | `iap_init()` 的 flag 分派**之前** | BAKPR `DATA18 == 0x5A5A`（引导区上电 150ms 内收到 `0x55 0xAA`） |
+| B 砖机兜底 | `Source/main.c` 的 `if(act != IAP_ACT_PARK)` 块首 | 8 秒内收到请求行。只在 `IAP_ACT_NONE`（A/B 双坏）时才走得到 |
+| （APP 命令） | `IoT-4G-v2` 的 MSH 命令 `serial_dl` | 置 `flag=0x3A` + BAKPR 标志 + 复位 → 走入口 A |
+
+> 入口 A 的优先级**必须**高于 flag 分派：砖机且 B 槽可用时，`default` 分支会判
+> `bak_ok` 直接就地回退，操作员就再也进不了串口模式。
+
+**协议**（PC 端 `tools/serial_dl.py`，只依赖 pyserial + zlib）：
+
+```
+PC   "#DL <size> <crc32hex>\r\n"      每 100ms 重发，上电前就开
+DEV  校验 -> 排空 RX -> "#RDY\r\n"
+DEV  preserve（A 备份到 B，214KB 满槽约 7s）
+DEV  排空 RX -> "#GO\r\n"
+PC   第 0 页（≤2048B）
+DEV  擦 1 页 + 写 -> ACK(0x06)
+...  每页等一个 ACK ...
+PC   末页（可不足 2048B）
+DEV  擦 1 页 + 写 -> 回读全量 CRC32 + 向量表检查
+DEV  ACK(0x06) = 提交+复位 / NAK(0x15) = 失败
+```
+
+**四条不变量（每条都是实测踩出来的）：**
+
+1. **按页 ACK 是整个协议的灵魂。** ACK 天然制造"PC 一定不在发数据"的窗口，
+   擦除/写入全塞进这个窗口 → 1 字节接收寄存器 + 无硬件流控的问题自动消失。
+   擦一页要 20~40ms，没有 ACK 的话这段时间正好够 PC 把接收寄存器冲爆。
+   收页循环内**禁止 printf**（混进一个字节整包就废），全部 printf 都在循环外
+   或终止分支上。
+2. **末页不回"页 ACK"** —— 它的应答就是最终裁决。多发一个会让上位机把页 ACK
+   当成裁决（CRC 失败也报成功）。
+3. **任何终止路径上，裁决字节必须先于日志。** 曾经把 `printf("[serial] verifying")`
+   放在裁决之前，工具读到了 `[` (0x5B) 当 ACK —— 61 页全传完却报"协议错位"。
+4. **控制字词表**：请求行 / `#RDY` / `#GO` 一律带 `#` 前缀，ACK/NAK 用
+   `0x06`/`0x15` 控制字节。上位机的接收窗口里混着设备日志（先开工具、板子后
+   上电，复位前 APP 还在打日志），裸 `"RDY"` 会被 `[.. 4G] RDY confirmed`
+   这类日志行误命中 —— 实测就这么失败过一次。
+
+**掉电安全性**：拿到请求后 / `#RDY` 后掉电 → 只写了元数据，A 未动；
+preserve 中掉电 → A 完好、`fw[1]` 未更新 → B 判不可用（丢回退点，设备仍能正常启动）；
+收页中 / 回读中掉电 → `fw[0]` 是旧记录或占位记录 → 引导区 CRC 失败判 A 无效 →
+回退 B；提交中掉电 → `Upgrade_t` 页被擦空 → `fw[0].crc = 0xFFFFFFFF` → 放行，
+**但此刻 A 已经过全量 CRC + 向量表检查，放行是安全的**。
+
+**实测记录（2026-09-18，硬件）**：完整刷写 61 页 14.0s（8.6 KB/s）；
+工具中途掐断 → 3s 超时 NAK → abort → 复位 → 引导区判 A 无效 → 从 B 回退 →
+正常启动 → 云端收到 `upgrade_result state=4`（安装失败），无砖无复位环；
+送复位向量指向槽外的镜像 → 被向量表检查拒绝且未提交。
+
+### BAKPR（备份寄存器）分配表
+
+BAKPR 由 VBAT 维持、**跨掉电存活**，加新寄存器前必须全工程 grep 一遍
+`BAKPR_DATA`。三个工程的宏必须一致。
+
+| 寄存器 | 用途 | 定义处 |
+|---|---|---|
+| `DATA1` | RTC 初始化标志 `0x5A5A` | `IoT-4G-v2/Hw/hw_rtc.c` |
+| `DATA2` | RTC 时间设置标志 / **同时**是崩溃转储 magic | 两者冲突（既有，未修） |
+| `DATA2`~`DATA16` | APP 崩溃转储（`CRASH_REG_*`，15 个寄存器 30 字节） | `IoT-4G-v2/Hw/hw_board.h` |
+| `DATA17` | boot 试用计数 | `boot.h` / `upgrade_ctrl.h` / `app_ota.c` |
+| `DATA18` | **串口下载请求标志 `0x5A5A`** | 同上三处 |
+| `DATA19`~`DATA42` | 空闲 | |
+
+> ⚠️ 串口标志最初选了 `DATA16`，正好撞上 `CRASH_REG_R1_H`。APP 每次
+> HardFault 都会把 `r1 >> 16` 写进去，约 1/65536 的概率等于 `0x5A5A` ——
+> 凭空造出一个串口请求，且没人清，会一直留到把某次云端 OTA 吞掉为止。
+> 已在 2026-09-18 迁到 `DATA18`。
+
 ### 重试模式
 
 下载（0x3A）和保底/回退复制（0xAA）阶段均使用显式的 while 循环重试计数器（`dl_retry`/`app_retry`），上限为 5（`UPGRADE_MAX_DL_RETRIES`/`UPGRADE_MAX_APP_RETRIES`）。不使用 goto。
@@ -296,14 +376,28 @@ QFREAD 失败重试前，`upgrade_recover_wait_with_wdt(5000)` 先排水 UART（
 
 ### 临界区模式
 
-Flash 写入需要关闭所有中断——写入期间若 IRQ 从 Flash 执行代码会导致硬件错误：
-
 ```c
 __disable_irq();
 hw_flash_erase(addr, size);
 hw_flash_write(addr, data, size);
 __enable_irq();
 ```
+
+> ⚠️ **2026-09-18 更正 —— 这个包裹其实不提供它所声称的保证。**
+>
+> 上层 `__disable_irq()` 在**第一次进 FMC 调用返回时就被撤销了**：SDK 的
+> `FMC_ErasePage` / `FMC_ProgramWord`（`apm32e10x_fmc.c:254/283/307/321`）
+> 自己无条件 `__set_PRIMASK(1)` … `__set_PRIMASK(0)`。Cortex-M3 的 PRIMASK
+> 没有嵌套计数，所以外层的"全程关中断"只是**假象**。
+>
+> 真正提供保证的是 SDK 那两句 —— 每次擦/写**内部**确实关了中断，
+> Flash 的按页原子性由此而来。外层的包裹既不多做事、又给人错误的安心感。
+> **`upgrade_serial_run()` 的逐页擦写因此不再包裹**（与 UFS 那条直接调用
+> `flash_write_with_wdt` 的路径保持一致）；`iap_state_flush()` 里的包裹是
+> 既有代码，保留但同样不提供额外保证。
+>
+> 仍然成立的两条：**不许在（真正关中断期间）`Delay_ms()`** —— 它是 SysTick
+> 计数忙等，会死等；**不许调用自带 `__enable_irq()` 的函数**改变中断状态。
 
 **返回值（2026-09-18 起才如实报错）**：`hw_flash_erase()` 原返回**页数**、
 `hw_flash_write()` 恒返回 `0`，`FMC_ErasePage`/`FMC_ProgramWord` 的结果一律

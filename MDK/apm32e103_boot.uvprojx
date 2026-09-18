@@ -434,6 +434,11 @@
               <FileType>1</FileType>
               <FilePath>..\App\ram_flash.c</FilePath>
             </File>
+            <File>
+              <FileName>serial_dl.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\App\serial_dl.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

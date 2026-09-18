@@ -23,6 +23,7 @@
 #include "iap.h"
 #include "main.h"
 #include "bsp_delay.h"
+#include "serial_dl.h"   /* serial_dl_take_request()：串口下载请求标志 */
 
 Upgrade_t upgrade;
 Upgrade_cfg_t upgrade_cfg;
@@ -242,6 +243,26 @@ int32_t iap_init(UPGRADE_CTX_T *ctx)
   app_ok = slot_usable(APP_ADDR,       &upgrade.fw[0]);
   bak_ok = slot_intact(UP_BACKUP_ADDR, &upgrade.fw[1]);   /* 备份槽只验完整性 */
   printf("slot check: app=%d bak=%d\r\n", (int)app_ok, (int)bak_ok);
+
+  /* ---- 串口下载请求（2026-09-18）—— 优先级【高于】下面的 flag 分派 ----
+   * 操作员正拿着线、手上电时就发了 0x55 0xAA，引导区据此把我们跳进来。
+   * 此时任何"自动回退 / 自动重装"都是在抢方向盘：砖机且 B 槽可用时，
+   * 下面的 default 分支会判 bak_ok 直接回退，操作员就再也进不了串口模式。 */
+  switch(serial_dl_take_request())
+  {
+  case 1:
+    ctx->action = UPGRADE_ACTION_SERIAL;
+    return IAP_ACT_INSTALL;   /* 尺寸由 PC 的请求行给，此处不填 expect_* */
+
+  case -1:
+    /* 标志清不掉 -> 刷完复位又会被送回来 -> 无限重刷。不赌，park 等现场。
+     * （BAKPR 写不进去通常意味着后备域已失效，不是能靠复位自愈的故障。） */
+    printf("!! serial request flag stuck -> PARK\r\n");
+    return IAP_ACT_PARK;
+
+  default:
+    break;
+  }
 
   switch(upgrade.flag)
   {
