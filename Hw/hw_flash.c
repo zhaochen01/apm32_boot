@@ -90,17 +90,6 @@ int32_t hw_flash_write(uint32_t addrStart, const void *pdata, uint32_t size)
 }
 
 
-int32_t hw_flash_read(uint32_t addrStart, void *pdata, uint32_t size)
-{
-  uint8_t *p = (uint8_t *)pdata;
-  while(size--)
-  {
-    *p++ = (*(__IO uint8_t*) addrStart++);  // ��ָ����ַ��һ������
-//    addrStart += 1;
-  }
-  return 0;
-}
-
 
 
 

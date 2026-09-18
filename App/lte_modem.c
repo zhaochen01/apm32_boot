@@ -36,14 +36,6 @@ const LTE_MODEM_CFG_T LTE_MODEM_CFG_EG800K =
   .rdy_pattern         = "RDY"
 };
 
-const LTE_MODEM_CFG_T LTE_MODEM_CFG_EC800 =
-{
-  .power_cycle_hold_ms = 500U,
-  .rdy_timeout_ms      = 5000U,
-  .rdy_retry_count     = 2U,
-  .rdy_pattern         = "RDY"
-};
-
 /* 分段延时并喂狗：长延时期间若不给外部 WDT 喂食会被 NRST 复位。
  * 2026-09-16 新增——原 Delay_ms(hold_ms)/Delay_ms(1500) 期间完全不喂，
  * 1500ms 已逼近典型 WDT 超时窗口。 */

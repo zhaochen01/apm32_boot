@@ -33,6 +33,5 @@ void     hw_uart3_abort_raw_rx(void);                  /* force exit raw mode */
 uint8_t  hw_uart3_take_fault_snapshot(uint32_t *recv_len, uint32_t *expect_len,
                                       uint32_t *ovre_cnt, uint32_t *fe_cnt,
                                       uint32_t *ne_cnt);
-void     hw_uart3_clear_counters(void);
 
 #endif /* _HW_UART3_H */

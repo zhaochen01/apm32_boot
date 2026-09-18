@@ -160,15 +160,6 @@ uint8_t hw_uart3_take_fault_snapshot(uint32_t *recv_len, uint32_t *expect_len,
   return fault_flag;
 }
 
-void hw_uart3_clear_counters(void)
-{
-  __disable_irq();
-  s_uart3.ovre_cnt = 0U;
-  s_uart3.fe_cnt = 0U;
-  s_uart3.ne_cnt = 0U;
-  __enable_irq();
-}
-
 /*!
  * @brief       USART3 interrupt handler - 4G module UART.
  *              Line mode: accumulates bytes until \r\n, delivers the

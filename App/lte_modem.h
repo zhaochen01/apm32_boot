@@ -22,7 +22,6 @@ typedef struct
 } LTE_MODEM_CFG_T;
 
 extern const LTE_MODEM_CFG_T LTE_MODEM_CFG_EG800K;
-extern const LTE_MODEM_CFG_T LTE_MODEM_CFG_EC800;
 
 /* power-cycle the module and bring up the AT channel (RDY + echo off) */
 int32_t lte_modem_init(const LTE_MODEM_CFG_T *cfg);

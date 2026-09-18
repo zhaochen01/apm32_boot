@@ -31,10 +31,6 @@
 #define UPGRADE_STATUS_FAILED 0x03   /* 安装失败  -> 上行 state=4 */
                                      /*  （含 abort 未实施、以及已回退两种） */
 
-/* 废弃：trial 机制不再使用；常量保留以免与 APP 侧结构体注释脱节 */
-#define UPGRADE_STATUS_TRIAL  0x01
-#define UPGRADE_TRIAL_LIMIT   3U
-
 /* 元数据中的固件信息有效判断 (Flash 空白为 0xFFFFFFFF) */
 #define FW_VALID(fw) (((fw)->size > 0U) && ((fw)->size != 0xFFFFFFFFU) && \
                       ((fw)->crc != 0xFFFFFFFFU) && ((fw)->size <= APP_MAX_SIZE))
@@ -102,7 +98,6 @@ extern int32_t iap_vector_ok(uint32_t addr, uint32_t end);
 
 extern int32_t hw_flash_erase(uint32_t addrStart, uint32_t size);
 extern int32_t hw_flash_write(uint32_t addrStart, const void *pdata, uint32_t size);
-extern int32_t hw_flash_read(uint32_t addrStart, void *pdata, uint32_t size);
 extern int32_t hw_flash_copy(uint32_t srcAddr, uint32_t dstAddr, uint32_t size);
   
 #endif

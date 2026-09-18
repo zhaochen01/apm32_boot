@@ -332,55 +332,6 @@ int fputc(int ch, FILE* f)
   return (ch);
 }
 
-#elif defined (__GNUC__)
-
-/*!
-* @brief       Redirect C Library function printf to serial port.
-*              After Redirection, you can use printf function.
-*
-* @param       ch:  The characters that need to be send.
-*
-* @retval      The characters that need to be send.
-*
-* @note
-*/
-int __io_putchar(int ch)
-{
-    /* send a byte of data to the serial port */
-    USART_TxData(DEBUG_USART, ch);
-
-    /* wait for the data to be send  */
-    while (USART_ReadStatusFlag(DEBUG_USART, USART_FLAG_TXBE) == RESET);
-
-    return ch;
-}
-
-/*!
-* @brief       Redirect C Library function printf to serial port.
-*              After Redirection, you can use printf function.
-*
-* @param       file:  Meaningless in this function.
-*
-* @param       *ptr:  Buffer pointer for data to be sent.
-*
-* @param       len:  Length of data to be sent.
-*
-* @retval      The characters that need to be send.
-*
-* @note
-*/
-int _write(int file, char* ptr, int len)
-{
-	UNUSED(file);
-    int i;
-    for (i = 0; i < len; i++)
-    {
-        __io_putchar(*ptr++);
-    }
-
-    return len;
-}
-
 #else
 #warning Not supported compiler type
 #endif
