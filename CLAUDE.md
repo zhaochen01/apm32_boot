@@ -394,7 +394,13 @@ typedef struct {
      boot 槽 —— 判据 `expect_params_ok_boot()` 用 `BOOT_SLOT_MAX_IMAGE`(24564) 而非 `APP_MAX_SIZE`
 6. **处处喂狗**：片内 IWDT 已移除，改由**外部 WDT**承担（PB0 翻转，`WDT_FEED()`）。每次 Flash 操作、`at_wait()`/`at_wait_raw_done()` 轮询、5 秒恢复等待、模组 RDY 等待都必须喂。漏掉一次就会静默复位。
 7. **`Delay_ms()` 依赖**：依赖 `SysTick_Handler` 递减 `cntMs`。若 `SysTick_Handler` 损坏或向量表未建立，`Delay_ms()` 将永远挂起 → 看门狗复位。
-8. **`hw_board.c` 双重用途**：该文件引用了 RT-Thread API（`rt_kprintf`、`rt_thread_create`、`INIT_DEVICE_EXPORT`），并定义了与 `main.c` 中相同的 `hw_gpio_init()`/`Hw_WDT_Cfg`。它似乎是 APP 工程共享的代码——修改前请确认它是否真的参与 boot loader 编译。
+8. **不要从 APP 工程拷 `hw_board.c` 进来（该文件已于 2026-09-18 删除）**：
+   它当时在磁盘上但不参与编译，且用了 22 处 RT-Thread API
+   （`rt_kprintf`/`rt_thread_create`/`INIT_DEVICE_EXPORT`/`rt_mutex_take`…）
+   ——升级 boot 是裸机，这份文件本来就不可能编过。真正的风险是它定义了与
+   `Source/main.c` **同名**的 `hw_gpio_init()` / `Hw_WDT_Cfg`：谁想改 boot 的
+   看门狗 GPIO，很容易在这个副本上动手，改了没有任何效果。
+   同类教训见"未编译的孤儿文件"——留在磁盘上但不进工程的代码比删掉更危险。
 9. **`LTE_READ_CHUNK_SIZE = 40960`**：40KB 的缓冲区（加上 2KB 传输层行队列）约占 SRAM 的 35%（APM32E103RE 为 128KB，IRAM 已配置全片）。未先检查链接器 map 之前不要增大。完整构建的 ZI-data 约 45KB。
 10. **Keil 工程是构建真相**：没有 Makefile。源文件包含、头文件路径、编译器宏全部配置在 `.uvprojx` XML 中。增删文件时必须同步更新工程文件。
 11. **编码现状混乱（待统一）**：本工程 `.c`/`.h` **既有 GBK 也有 UTF-8**，且部分文件
