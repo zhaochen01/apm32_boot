@@ -342,6 +342,16 @@ static void upgrade_self_run(void)
    * 引导区每次启动 +1，超过 BOOT_TRIAL_LIMIT 就放弃 A 槽、返回 0，
    * 上层据此跳 APP，由 APP 把 B 槽的旧 boot 拷回 A 完成回退。
    * 新 boot 正常跑起来后，由 APP 首次进初始化链时清 0。 */
+  /* 必须先使能后备域写访问：ST 系的 BKP 数据寄存器在备份域复位后是写保护的，
+   * BAKPR_ConfigBackupRegister() 自己不开。不开这句，下面那次写就是空操作，
+   * 引导区的试用计数永远是 0 —— "新 boot 起不来就回退"的安全网整个失效
+   * （2026-09-18 硬件实测：崩溃 boot 能无限跳、无限复位）。
+   * APP 侧之所以没事，是因为 hw_rtc_init / hw_board_init 已经开过了。 */
+  /* PMU 与 BAKR 两个时钟都要开：只开 PMU 不够，没有 BKP 外设时钟，
+   * 数据寄存器的写同样不落地。与 APP 的 hw_rtc_init 保持一致。 */
+  RCM_EnableAPB1PeriphClock(RCM_APB1_PERIPH_PMU | RCM_APB1_PERIPH_BAKR);
+  PMU_EnableBackupAccess();
+
   BAKPR_ConfigBackupRegister(BOOT_TRIAL_REG, 1u);
 
   /* ---- ⑥ 交给 RAM 例程擦写 A；永不返回 ---- */
