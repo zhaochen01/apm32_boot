@@ -164,6 +164,28 @@ static int32_t upgrade_preserve_backup(const UPGRADE_CTX_T *ctx)
     if(!iap_vector_ok(ctx->run_addr, ctx->run_addr + APP_MAX_SIZE))
     {
       printf("run region invalid, skip preserve\r\n");
+
+      /* ---- 半写保护（2026-09-18）----
+       * 擦运行区【之前】必须让引导区有能力判它无效。
+       *
+       * fw[0].crc == 0xFFFFFFFF 在引导区 boot_app_valid() 眼里是
+       * "无记录 = 放行"（产线 J-Link 裸烧语义）。空白板走到这条分支时
+       * A 没有向量表 -> 跳过拷贝且不写任何记录 -> fw[0] 保持 0xFFFFFFFF。
+       * 于是一旦下载中途掉电：引导区放行半写的 A 槽（第 0 页就是新镜像的
+       * 向量表，必然通过它的向量表检查）-> 执行到 0xFF -> HardFault ->
+       * NRST -> 复位环；且此时 app != 0，引导区永远跳 APP，升级 boot 再也
+       * 进不去 —— 串口救援都够不着。
+       *
+       * 写一条不可能匹配的占位记录：crc=0 与真实 CRC32 撞上的概率 2^-32。
+       * 装成功时会被真实值覆盖；装失败时正好让 A 被判无效、走回退路径。
+       * 两侧判据同构（iap.c 的 slot_usable 与引导区 boot_app_valid 都是
+       * "crc != 0xFFFFFFFF 就做全量 CRC 比对"），不会产生判据漂移。
+       *
+       * 用 iap_state_save()（只落盘不复位）—— 复位了就轮不到下面擦写了。 */
+      upgrade.fw[0].size = ctx->expect_size;
+      upgrade.fw[0].crc  = 0u;
+      iap_state_save();
+
       return 0;
     }
 
