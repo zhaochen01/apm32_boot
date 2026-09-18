@@ -232,6 +232,24 @@ APP 下载前（app_ota.c Step 1）→ QFDEL 删旧
 
 **试用计数 `BAKPR_DATA17`**（`BOOT_TRIAL_REG`，与引导区 `App/boot.c` 同址）：
 
+> ⚠️ **写 BAKPR 之前必须先使能后备域访问**（2026-09-18 硬件实测挖出的真根因）
+>
+> ```c
+> RCM_EnableAPB1PeriphClock(RCM_APB1_PERIPH_PMU | RCM_APB1_PERIPH_BAKR);
+> PMU_EnableBackupAccess();     /* 置 PMU_CTRL.BPWEN */
+> ```
+>
+> ST 系 MCU 备份域复位后，**BKP 数据寄存器是写保护的**。SDK 的
+> `BAKPR_ConfigBackupRegister()` **自己不做这件事**，所以没这两句的话写就是
+> **空操作**（读不受影响，照常返回旧值）。
+> **两个时钟都要开** —— 只开 `PMU` 不够，没有 BKP 外设时钟写同样不落地
+> （实测：只加 PMU 那版仍无限复位循环，补上 BAKR 才通过）。
+>
+> 本工程与引导区原先**都没开**，只有 APP 的 `hw_rtc_init` / `hw_board_init` 开了
+> —— 于是**试用计数机制从上线起就没生效过**，读回来永远是 APP 上次留下的 0。
+> 症状：`flag=0x3A` + 一份"CRC 合法但一跑就崩"的 boot → 无限跳、无限复位。
+> 现在 `upgrade_self_run()` 写 trial 前开，引导区在 `boot_bakpr_init()` 里开。
+
 | 角色 | 位置 | 行为 |
 |------|------|------|
 | 写者 | 本工程 `upgrade_self_run()` | 自升级成功时置 `1`（"新 boot 进入试用期"） |
@@ -520,3 +538,16 @@ typedef struct {
     会让这段检查恒判 invalid，症状是 `expect param invalid, abort`，
     而此时 `iap_init` 自己的 `expect_params_ok_boot()` 明明是通过的。
     这两个坑（17/18）编译期都发现不了，只有端到端跑一次才会暴露。
+19. **写 BAKPR 前必须使能后备域访问（2026-09-18 硬件实测）**：ST 系 MCU 备份域
+    复位后 BKP 数据寄存器**写保护**，`BAKPR_ConfigBackupRegister()` 自己不使能 ——
+    漏了就是**静默空操作**（读照常返回旧值，所以查不出异常）。要两句：
+
+        RCM_EnableAPB1PeriphClock(RCM_APB1_PERIPH_PMU | RCM_APB1_PERIPH_BAKR);
+        PMU_EnableBackupAccess();
+
+    **两个时钟都要开**：只加 `PMU` 仍不生效（实测：只加 PMU 那版依旧无限复位
+    循环，补上 `BAKR` 才通过）。APP 侧一直是对的（`hw_rtc_init`/`hw_board_init`），
+    引导区与升级 boot 原先都没开 —— 于是**试用计数机制从上线起就没生效过**，
+    详见"试用计数"一节。同类教训：**外设寄存器的写保护/时钟门控漏了不会报错**，
+    只会让写悄悄失效 —— 涉及 BKP/RTC/PMU 这类后备域外设时先确认门控。
+    诊断手法：用 J-Link 直接 `mem32` 读该寄存器，看写入前后是否真的变了。
