@@ -71,10 +71,13 @@ main.c
   hw_uart.c/h    → USART1（调试，115200）+ USART3（4G 模块，115200）引脚配置
   hw_flash.c/h   → FMC 页擦除 / 字写入 / 字节读取
   iap.c/h        → 启动决策、槽判据、升级元数据初始化/保存、结构体定义
-  hw_board.c/h   → RT-Thread 板级信息（可能与 APP 共享，不在 boot 编译内）
   ram_flash.c/h  → RAM 常驻的 Flash 擦写例程（`.ramfunc` 段）：boot 自升级专用
-  http.c/h       → 占位文件（空实现，预留给将来使用）
 ```
+
+> 清单里 10 个 `.c` 与 `MDK/apm32e103_boot.uvprojx` 登记的自建源文件逐一对应，
+> 另加 `Source/main.c`、`Source/system_apm32e10x.c`，共 12 个 —— 这就是全部会参与
+> 编译的代码。**磁盘上有、工程里没有的 `.c` 一律视为不存在**：不参与编译，改它没有
+> 任何效果。曾经的 `hw_board.c` 就是这种坑，详见已知问题 #8。
 
 ### USART3 接收路径（hw_uart3 + at_transport）
 
