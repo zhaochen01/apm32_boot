@@ -1,7 +1,7 @@
 #include "bsp_delay.h"
 
 
-volatile uint32_t g_sys_tick = 0; // ÏµÍ³µÎ´ğÊı£¨ms¼¶£©
+volatile uint32_t g_sys_tick = 0; // ç³»ç»Ÿæ»´ç­”æ•°ï¼ˆmsçº§ï¼‰
 
 /* The count of microseconds */
 __IO uint32_t cntUs = 0;
@@ -10,20 +10,20 @@ __IO uint32_t cntMs = 0;
 
 
 /**
- * @brief  SysTickÖĞ¶Ï·şÎñº¯Êı£¨±ØĞëÌí¼Óµ½ÖĞ¶ÏÏòÁ¿±í£©
- * @retval ÎŞ
+ * @brief  SysTickä¸­æ–­æœåŠ¡å‡½æ•°ï¼ˆå¿…é¡»æ·»åŠ åˆ°ä¸­æ–­å‘é‡è¡¨ï¼‰
+ * @retval æ— 
  */
 void SysTick_Handler(void)
 {
-    g_sys_tick++; // Ã¿1ms¼Ó1
+    g_sys_tick++; // æ¯1msåŠ 1
     cntUs--;
     cntMs--;
 }
 
 /**
- * @brief  ³õÊ¼»¯ÑÓÊ±º¯Êı£¨SysTick 1msÖĞ¶ÏÒ»´Î£©
- * @retval ÎŞ
- * @note   ÏµÍ³Ê±ÖÓÎª36MHz
+ * @brief  åˆå§‹åŒ–å»¶æ—¶å‡½æ•°ï¼ˆSysTick 1msä¸­æ–­ä¸€æ¬¡ï¼‰
+ * @retval æ— 
+ * @note   ç³»ç»Ÿæ—¶é’Ÿä¸º36MHz
  */
 void Delay_Init(void)
 {
@@ -32,8 +32,8 @@ void Delay_Init(void)
 
 
 /**
- * @brief  »ñÈ¡µ±Ç°ÏµÍ³µÎ´ğÊı£¨ms¼¶£©
- * @retval µ±Ç°µÎ´ğÊı
+ * @brief  è·å–å½“å‰ç³»ç»Ÿæ»´ç­”æ•°ï¼ˆmsçº§ï¼‰
+ * @retval å½“å‰æ»´ç­”æ•°
  */
 uint32_t Delay_GetTick(void)
 {
@@ -41,19 +41,19 @@ uint32_t Delay_GetTick(void)
 }
 
 /**
- * @brief  ·Ç×èÈûÊ½ÑÓÊ±£º¼ì²éÊÇ·ñ³¬Ê±
- * @param  start_tick: ÆğÊ¼µÎ´ğÊı£¨´«Èë±äÁ¿µØÖ·£¬Ê×´Îµ÷ÓÃÇ°Ğè¸³ÖµÎªDelay_GetTick()£©
- * @param  ms: ³¬Ê±Ê±¼ä£¨ms£©
- * @retval 1: ³¬Ê±£¬0: Î´³¬Ê±
- * @note   Ê¾Àı£º
+ * @brief  éé˜»å¡å¼å»¶æ—¶ï¼šæ£€æŸ¥æ˜¯å¦è¶…æ—¶
+ * @param  start_tick: èµ·å§‹æ»´ç­”æ•°ï¼ˆä¼ å…¥å˜é‡åœ°å€ï¼Œé¦–æ¬¡è°ƒç”¨å‰éœ€èµ‹å€¼ä¸ºDelay_GetTick()ï¼‰
+ * @param  ms: è¶…æ—¶æ—¶é—´ï¼ˆmsï¼‰
+ * @retval 1: è¶…æ—¶ï¼Œ0: æœªè¶…æ—¶
+ * @note   ç¤ºä¾‹ï¼š
  *         uint32_t tick = Delay_GetTick();
- *         if (Delay_CheckTimeout(&tick, 1000)) { ... } // 1ÃëºóÖ´ĞĞ
+ *         if (Delay_CheckTimeout(&tick, 1000)) { ... } // 1ç§’åæ‰§è¡Œ
  */
 uint8_t Delay_CheckTimeout(uint32_t *start_tick, uint32_t ms)
 {
     if (Delay_GetTick() - *start_tick >= ms)
     {
-        *start_tick = Delay_GetTick(); // ÖØÖÃÆğÊ¼µÎ´ğÊı£¨¿ÉÑ¡£©
+        *start_tick = Delay_GetTick(); // é‡ç½®èµ·å§‹æ»´ç­”æ•°ï¼ˆå¯é€‰ï¼‰
         return 1;
     }
     return 0;

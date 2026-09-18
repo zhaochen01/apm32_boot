@@ -10,7 +10,7 @@ APM32E103 Boot Loader：通过 Quectel CAT-1 4G 模块进行远程固件升级�
 - **4G 模块**：Quectel CAT-1 系列（EC800/EG800K），AT 指令集
 - **编译器**：ARMCC（Keil MDK v5）；GCC 亦可通过 `#ifdef` 块支持
 - **版本**：v2.2.0.102（**权威值在 `Include/main.h` 的 `VERSION`** —— 这份文档里的数字只是快照，改版本号时以文件为准）
-- **字符编码**：C 源码注释与字符串使用 GBK/GB2312
+- **字符编码**：C 源码统一 **UTF-8**（2026-09-18 由混合状态全量转换而来，与 IoT-4G-v2、引导区一致）
 
 ## 构建
 
@@ -467,10 +467,12 @@ typedef struct {
    同类教训见"未编译的孤儿文件"——留在磁盘上但不进工程的代码比删掉更危险。
 9. **`LTE_READ_CHUNK_SIZE = 40960`**：40KB 的缓冲区（加上 2KB 传输层行队列）约占 SRAM 的 35%（APM32E103RE 为 128KB，IRAM 已配置全片）。未先检查链接器 map 之前不要增大。完整构建的 ZI-data 约 45KB。
 10. **Keil 工程是构建真相**：没有 Makefile。源文件包含、头文件路径、编译器宏全部配置在 `.uvprojx` XML 中。增删文件时必须同步更新工程文件。
-11. **编码现状混乱（待统一）**：本工程 `.c`/`.h` **既有 GBK 也有 UTF-8**，且部分文件
-    （`App/iap.h` 48 处、`Source/main.c` 208 处）的中文注释已被 `U+FFFD` 替换字符**永久损坏**
-    —— 某次 GBK→UTF-8 转换用了 `errors='replace'`。编辑前先确认目标文件的编码，
-    **按原编码写回**。损坏注释可用 git 历史恢复（参考 IoT-4G-v2 的 `hw_board.c` 修复过程）。
+11. **编码已统一为 UTF-8（2026-09-18）**：原先 `.c`/`.h` 既 GBK 又 UTF-8，现已全量转为
+    UTF-8，三个工程一致。转换前做过扫描 + 编译产物逐字节比对，确认**对运行时零影响**
+    （详见 `IoT-4G-v2/CLAUDE.md` 的"文件编码"一节，含两个排查陷阱）。
+    遗留：部分文件的注释里仍有历史 `U+FFFD`/`?` 损坏（`App/iap.h`、`Source/main.c` 等），
+    那是早先某次 `errors='replace'` 转换留下的，**转换不修复它**，可用 git 历史恢复。
+    **新写文件一律 UTF-8，且绝不用 `errors='replace'`。**
 12. **槽判据必须两边同构（最高优先级）**：`iap.c` 的 `slot_usable()` 与引导区
     `apm32_e103_bootstrap/App/boot.c` 的 `boot_app_valid()` 是**同一份判据的两份拷贝**
     （MSP 落 RAM、复位向量落本槽、Thumb 位、无记录放行、按记录长度全量 CRC）。

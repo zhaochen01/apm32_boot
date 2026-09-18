@@ -1,22 +1,22 @@
 /*
- * ram_flash.c ¡ª¡ª RAM ³£×¤µÄ Flash ²ÁÐ´Àý³Ì£¨boot ×ÔÉý¼¶×¨ÓÃ£©
+ * ram_flash.c â€”â€” RAM å¸¸é©»çš„ Flash æ“¦å†™ä¾‹ç¨‹ï¼ˆboot è‡ªå‡çº§ä¸“ç”¨ï¼‰
  *
- * ÎªÊ²Ã´±ØÐë·Å RAM£º
- *   Éý¼¶ boot ÅÜÔÚ A ²Û£¨0x08003000£©Àï£¬¶ø boot ×ÔÉý¼¶Òª²ÁÐ´µÄÕýÊÇ A ²Û¡£
- *   ²Á³ý A µÄÄÇÒ»¿Ì£¬Flash ÀïµÄ±¾º¯Êý¾ÍÃ»ÁË ¡ª¡ª Ö»ÓÐ RAM ÀïµÄ¸±±¾»¹ÄÜ°Ñ
- *   Ê£ÏÂµÄ²Á³ý + Ð´ÈëÅÜÍê¡£Õâ¾ÍÊÇ IAP µÄ¾­µä×ö·¨¡£
+ * ä¸ºä»€ä¹ˆå¿…é¡»æ”¾ RAMï¼š
+ *   å‡çº§ boot è·‘åœ¨ A æ§½ï¼ˆ0x08003000ï¼‰é‡Œï¼Œè€Œ boot è‡ªå‡çº§è¦æ“¦å†™çš„æ­£æ˜¯ A æ§½ã€‚
+ *   æ“¦é™¤ A çš„é‚£ä¸€åˆ»ï¼ŒFlash é‡Œçš„æœ¬å‡½æ•°å°±æ²¡äº† â€”â€” åªæœ‰ RAM é‡Œçš„å‰¯æœ¬è¿˜èƒ½æŠŠ
+ *   å‰©ä¸‹çš„æ“¦é™¤ + å†™å…¥è·‘å®Œã€‚è¿™å°±æ˜¯ IAP çš„ç»å…¸åšæ³•ã€‚
  *
- * ============================ ÊµÏÖÔ¼Êø ============================
- * ÆÆ»µÁËÈÎÒâÒ»Ìõ£¬¶¼»áÔÚ²Á³ýºóÌø»Ø Flash È¡Ö¸ -> HardFault£º
- *   1. ÍêÈ«×Ô°üº¬£º²»µ÷ÓÃÈÎºÎÆäËûº¯Êý
- *   2. ²»·ÃÎÊÈÎºÎÈ«¾Ö/¾²Ì¬±äÁ¿£¨È«²¿×ß²ÎÊý£©
- *   3. ³ý´«ÈëµÄ src Ö¸ÕëÍâ£¬²»¶ÁÈÎºÎ Flash µØÖ·
- *   4. ×ÖÃæÁ¿³Ø±ØÐëËæ´úÂëÒ»Æð½ø .ramfunc£¨ÓÉ scatter ±£Ö¤£©
- *   5. Íê³ÉºóÖ±½Ó¸´Î» ¡ª¡ª µ÷ÓÃÕßÔÚ A ²ÛÀï£¬ÒÑ¾­±»²ÁµôÁË£¬²»ÄÜ·µ»Ø
+ * ============================ å®žçŽ°çº¦æŸ ============================
+ * ç ´åäº†ä»»æ„ä¸€æ¡ï¼Œéƒ½ä¼šåœ¨æ“¦é™¤åŽè·³å›ž Flash å–æŒ‡ -> HardFaultï¼š
+ *   1. å®Œå…¨è‡ªåŒ…å«ï¼šä¸è°ƒç”¨ä»»ä½•å…¶ä»–å‡½æ•°
+ *   2. ä¸è®¿é—®ä»»ä½•å…¨å±€/é™æ€å˜é‡ï¼ˆå…¨éƒ¨èµ°å‚æ•°ï¼‰
+ *   3. é™¤ä¼ å…¥çš„ src æŒ‡é’ˆå¤–ï¼Œä¸è¯»ä»»ä½• Flash åœ°å€
+ *   4. å­—é¢é‡æ± å¿…é¡»éšä»£ç ä¸€èµ·è¿› .ramfuncï¼ˆç”± scatter ä¿è¯ï¼‰
+ *   5. å®ŒæˆåŽç›´æŽ¥å¤ä½ â€”â€” è°ƒç”¨è€…åœ¨ A æ§½é‡Œï¼Œå·²ç»è¢«æ“¦æŽ‰äº†ï¼Œä¸èƒ½è¿”å›ž
  * ==================================================================
  *
- * ÓÉ scatter µÄ ER_RAMFUNC Çø³ÐÔØ£º__main Æô¶¯Ê±°Ñ Flash ÀïµÄ¼ÓÔØ¸±±¾
- * °áµ½ RAM Ö´ÐÐÇø£¨¼û MDK/apm32e103_boot.sct£©¡£
+ * ç”± scatter çš„ ER_RAMFUNC åŒºæ‰¿è½½ï¼š__main å¯åŠ¨æ—¶æŠŠ Flash é‡Œçš„åŠ è½½å‰¯æœ¬
+ * æ¬åˆ° RAM æ‰§è¡ŒåŒºï¼ˆè§ MDK/apm32e103_boot.sctï¼‰ã€‚
  */
 
 #include "apm32e10x.h"
@@ -25,12 +25,12 @@
 #define RAMFN   __attribute__((section(".ramfunc"))) __attribute__((noinline))
 
 #define FMC_PAGE_SIZE   0x800u          /* 2KB */
-#define FMC_TIMEOUT     0x000B0000u     /* Óë SDK FMC_WaitForLastOperation Í¬Öµ */
+#define FMC_TIMEOUT     0x000B0000u     /* ä¸Ž SDK FMC_WaitForLastOperation åŒå€¼ */
 #define FMC_BUSY_BIT    0x00000001u     /* FMC->STS bit0 = BUSY */
 
 /*
- * µÈ FMC ¿ÕÏÐ£º1=¾ÍÐ÷ 0=³¬Ê±¡£
- * ²»µ÷ SDK µÄ FMC_WaitForLastOperation ¡ª¡ª ÄÇ¸öº¯ÊýÔÚ Flash Àï¡£
+ * ç­‰ FMC ç©ºé—²ï¼š1=å°±ç»ª 0=è¶…æ—¶ã€‚
+ * ä¸è°ƒ SDK çš„ FMC_WaitForLastOperation â€”â€” é‚£ä¸ªå‡½æ•°åœ¨ Flash é‡Œã€‚
  */
 RAMFN static int32_t ram_fmc_wait(void)
 {
@@ -43,7 +43,7 @@ RAMFN static int32_t ram_fmc_wait(void)
     return 0;
 }
 
-/* Ð´Ò»¸ö 16 Î»°ë×Ö£¨Óë SDK FMC_ProgramWord µÄµ¥´Î°ë×Ö±à³ÌÓïÒåÒ»ÖÂ£© */
+/* å†™ä¸€ä¸ª 16 ä½åŠå­—ï¼ˆä¸Ž SDK FMC_ProgramWord çš„å•æ¬¡åŠå­—ç¼–ç¨‹è¯­ä¹‰ä¸€è‡´ï¼‰ */
 RAMFN static int32_t ram_fmc_prog_half(uint32_t addr, uint16_t half)
 {
     if (!ram_fmc_wait()) return 0;
@@ -55,14 +55,14 @@ RAMFN static int32_t ram_fmc_prog_half(uint32_t addr, uint16_t half)
 }
 
 /*
- * °Ñ src ÀïµÄ img_size ×Ö½ÚÐ´½ø slot_addr ¿ªµÄ²Û£ºÕû²Û²Á³ý -> Öð°ë×ÖÐ´¾µÏñ
- * -> ²ÛÎ²Ð´ {crc, size}£¨crc@slot_size-12 / size@slot_size-8£©-> ¸´Î»¡£
+ * æŠŠ src é‡Œçš„ img_size å­—èŠ‚å†™è¿› slot_addr å¼€çš„æ§½ï¼šæ•´æ§½æ“¦é™¤ -> é€åŠå­—å†™é•œåƒ
+ * -> æ§½å°¾å†™ {crc, size}ï¼ˆcrc@slot_size-12 / size@slot_size-8ï¼‰-> å¤ä½ã€‚
  *
- * wdt_odata : Íâ²¿¿´ÃÅ¹·ÄÇ¸ö GPIO µÄ ODATA ¼Ä´æÆ÷µØÖ·£¨µ÷ÓÃ·½ËãºÃ´«½øÀ´£¬
- *             ±ÜÃâ±¾º¯ÊýÈ¥È¡È«¾Ö±äÁ¿µÄµØÖ· -> ×ÖÃæÁ¿³ØÁôÔÚ Flash µÄ·çÏÕ£©
- * wdt_pin   : ¶ÔÓ¦Òý½ÅÑÚÂë
+ * wdt_odata : å¤–éƒ¨çœ‹é—¨ç‹—é‚£ä¸ª GPIO çš„ ODATA å¯„å­˜å™¨åœ°å€ï¼ˆè°ƒç”¨æ–¹ç®—å¥½ä¼ è¿›æ¥ï¼Œ
+ *             é¿å…æœ¬å‡½æ•°åŽ»å–å…¨å±€å˜é‡çš„åœ°å€ -> å­—é¢é‡æ± ç•™åœ¨ Flash çš„é£Žé™©ï¼‰
+ * wdt_pin   : å¯¹åº”å¼•è„šæŽ©ç 
  *
- * ·µ»Ø£ºÓÀ²»·µ»Ø£¨Ä©Î²¸´Î»£©¡£
+ * è¿”å›žï¼šæ°¸ä¸è¿”å›žï¼ˆæœ«å°¾å¤ä½ï¼‰ã€‚
  */
 RAMFN void ram_flash_program(uint32_t slot_addr, uint32_t slot_size,
                              const uint8_t *src, uint32_t img_size, uint32_t crc,
@@ -72,14 +72,14 @@ RAMFN void ram_flash_program(uint32_t slot_addr, uint32_t slot_size,
     uint32_t i;
     uint16_t half;
 
-    /* È«³Ì¹ØÖÐ¶Ï£ºISR ÔÚ Flash Àï£¬²Á³ýºóÈ¡Ö¸±Ø±À */
+    /* å…¨ç¨‹å…³ä¸­æ–­ï¼šISR åœ¨ Flash é‡Œï¼Œæ“¦é™¤åŽå–æŒ‡å¿…å´© */
     __disable_irq();
 
-    /* ½âËø */
+    /* è§£é” */
     FMC->KEY = 0x45670123u;
     FMC->KEY = 0xCDEF89ABu;
 
-    /* ---- Õû²Û²Á³ý ---- */
+    /* ---- æ•´æ§½æ“¦é™¤ ---- */
     for (off = 0u; off < slot_size; off += FMC_PAGE_SIZE) {
         if (!ram_fmc_wait()) goto out;
         FMC->CTRL2_B.PAGEERA = 1u;
@@ -87,21 +87,21 @@ RAMFN void ram_flash_program(uint32_t slot_addr, uint32_t slot_size,
         FMC->CTRL2_B.STA = 1u;
         if (!ram_fmc_wait()) { FMC->CTRL2_B.PAGEERA = 0u; goto out; }
         FMC->CTRL2_B.PAGEERA = 0u;
-        if (wdt_odata) *wdt_odata ^= wdt_pin;      /* Ã¿Ò³Î¹¹· */
+        if (wdt_odata) *wdt_odata ^= wdt_pin;      /* æ¯é¡µå–‚ç‹— */
     }
 
-    /* ---- Ð´¾µÏñ£¨Öð°ë×Ö£©---- */
+    /* ---- å†™é•œåƒï¼ˆé€åŠå­—ï¼‰---- */
     for (i = 0u; i < img_size; i += 2u) {
         half = (uint16_t)src[i];
         half |= (uint16_t)((i + 1u < img_size) ? ((uint16_t)src[i + 1u] << 8)
                                                 : 0xFF00u);
         if (!ram_fmc_prog_half(slot_addr + i, half)) goto out;
 
-        /* 512 ×Ö½ÚÎ¹Ò»´Î¹·£º24KB Ð´ÈëÔ¼ 0.6s£¬¹»ÃÜ */
+        /* 512 å­—èŠ‚å–‚ä¸€æ¬¡ç‹—ï¼š24KB å†™å…¥çº¦ 0.6sï¼Œå¤Ÿå¯† */
         if ((i & 0x1FFu) == 0u && wdt_odata) *wdt_odata ^= wdt_pin;
     }
 
-    /* ---- ²ÛÎ² {crc, size} ---- */
+    /* ---- æ§½å°¾ {crc, size} ---- */
     if (!ram_fmc_prog_half(slot_addr + slot_size - 12u, (uint16_t)crc)) goto out;
     if (!ram_fmc_prog_half(slot_addr + slot_size - 10u, (uint16_t)(crc >> 16))) goto out;
     if (!ram_fmc_prog_half(slot_addr + slot_size -  8u, (uint16_t)img_size)) goto out;
@@ -111,8 +111,8 @@ out:
     FMC->CTRL2_B.LOCK = 1u;
     if (wdt_odata) *wdt_odata ^= wdt_pin;
 
-    /* ²»·µ»Ø ¡ª¡ª µ÷ÓÃÕßÔÚ A ²ÛÀï£¬ÒÑ¾­±»²ÁµôÁË¡£Ö±½Ó¸´Î»½»»ØÒýµ¼Çø¡£
-     * ÊÖÐ´ AIRCR ¶ø²»µ÷ NVIC_SystemReset()£¬±ÜÃâÈÎºÎÌø»Ø Flash µÄ¿ÉÄÜ¡£ */
+    /* ä¸è¿”å›ž â€”â€” è°ƒç”¨è€…åœ¨ A æ§½é‡Œï¼Œå·²ç»è¢«æ“¦æŽ‰äº†ã€‚ç›´æŽ¥å¤ä½äº¤å›žå¼•å¯¼åŒºã€‚
+     * æ‰‹å†™ AIRCR è€Œä¸è°ƒ NVIC_SystemReset()ï¼Œé¿å…ä»»ä½•è·³å›ž Flash çš„å¯èƒ½ã€‚ */
     SCB->AIRCR = (0x5FAu << 16) | (1u << 2);
     for (;;) { }
 }
