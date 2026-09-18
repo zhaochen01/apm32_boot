@@ -223,11 +223,29 @@ APP 下载前（app_ota.c Step 1）→ QFDEL 删旧
 | 角色 | 位置 | 行为 |
 |------|------|------|
 | 写者 | 本工程 `upgrade_self_run()` | 自升级成功时置 `1`（"新 boot 进入试用期"） |
-| 递增者 | 引导区 `boot_pick_stage2()` | 每次启动发现非 `0`（且非 `0xFFFF`）就 `+1`；`> BOOT_TRIAL_LIMIT(5)` 放弃 A 槽、返回 0 → 上层跳 APP |
-| 清者 | APP `app_ota_boot_slot_check()` | 只有确认能跑起来才清 `0` |
+| 递增者 | 引导区 `boot_stage2_trial()` | **每次真正要跳进 boot 槽之前** `+1`；`> BOOT_TRIAL_LIMIT(5)` 就拒绝跳入 → 落到"跳 APP" |
+| 清者 | APP `app_ota_boot_slot_check()` | 每次启动只要读到非 `0`/非 `0xFFFF` 就无条件清 `0` |
+
+**一次「试用」= 引导区实际把控制权交给 boot 一次**，不是"启动一次"。普通重启（`flag=0x5A` 且 APP 有效）根本不跳 boot 槽，就不该消耗次数。
 
 新 boot 即使 CRC 完好也可能一跑就崩 —— 镜像本身查不出毛病，**计数超限是唯一证据**：APP 发现计数 `> 5` 时，即便 CRC 完好也强制从 B 槽回退 A。
-（必须清：不清的话计数只增不减，5 次重启后引导区永久放弃 A 槽，boot 彻底报废。）
+
+> ⚠️ **2026-09-18 修 —— 原实现是无限复位环的环源**
+>
+> 递增原本写在 `boot_pick_stage2()` 里，**每次启动都 +1**，而且被关在
+> `if (trial != 0 && trial != 0xFFFF)` 守卫**里面**。APP 又每次启动都清 `0`，
+> 于是计数永远在 `0`/`1`/`2` 之间摆动，`> 5` 永不成立；更糟的是清零后
+> `trial == 0` 让整个累加块被跳过，计数从此再也涨不上去。
+>
+> 后果链条：boot 自升级后 `flag` 已是 `0x5A` → 下次启动引导区**直接跳 APP，
+> 新 boot 从未被执行** → APP 却把它当成"已验证"清 `0` → 之后某次 OTA 写
+> `flag=0x3A`，引导区跳进这个 CRC 合法但一跑就崩的 boot → **无限复位环，
+> 设备砖死只能 J-Link 救**。
+>
+> 修法：把累加挪到两个 `boot_jump(stage2)` 调用点之前（引导区 `App/boot.c` 的
+> `boot_stage2_trial()`），使 APP 的清零不再有破坏性 —— 计数总能从 `0` 重新武装。
+> 修后实测行为：`flag=0x3A` + 崩溃 boot，跳入 5 次后第 6 次改跳 APP，
+> APP 见 `trial=6 > 5` 强制回滚 A，闭环恢复。
 
 **槽常量**（与引导区 `App/boot.h`、`tools/postbuild_boot_slot.py`、APP 侧 `IoT-4G-v2/App/app_ota.h`/`app_ota.c` 逐字节一致）：`BOOT_SLOT_SIZE`(24576)、`BOOT_SLOT_MAX_IMAGE`(24564)、`BOOT_A_ADDR`/`BOOT_B_ADDR`、`BOOT_UPDATE_FILE_NAME`(`"UFS:boot_update.bin"`)、`UPGRADE_ACTION_SELF`(0x3B)。
 
