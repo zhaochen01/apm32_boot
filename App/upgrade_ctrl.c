@@ -27,7 +27,6 @@
 #include "iap.h"
 #include "bsp_delay.h"
 #include "ram_flash.h"   /* ram_flash_program()：RAM 常驻的 Flash 擦写例程 */
-#include "apm32e10x_iwdt.h"
 
 #include <string.h>
 

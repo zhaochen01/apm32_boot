@@ -18,7 +18,6 @@
 #include "at_transport.h"
 #include "hw_uart3.h"
 #include "bsp_delay.h"
-#include "apm32e10x_iwdt.h"
 
 #include <string.h>
 
@@ -148,10 +147,6 @@ static int32_t match_line(const char *line, const char *target, AT_MATCH_MODE_T 
 {
   const char *p = line;
 
-  if(mode == AT_MATCH_ANY)
-  {
-    return 0;
-  }
   if((line == NULL) || (target == NULL))
   {
     return -1;
@@ -217,11 +212,11 @@ int32_t at_wait(const char *target, AT_MATCH_MODE_T mode, uint32_t timeout_ms)
   uint32_t start_tick;
   uint32_t timeout;
 
-  if((mode != AT_MATCH_EXACT) && (mode != AT_MATCH_CONTAINS) && (mode != AT_MATCH_ANY))
+  if((mode != AT_MATCH_EXACT) && (mode != AT_MATCH_CONTAINS))
   {
     return AT_ERR_PARAM;
   }
-  if((target == NULL) && (mode != AT_MATCH_ANY))
+  if(target == NULL)
   {
     return AT_ERR_PARAM;
   }

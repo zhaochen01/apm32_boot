@@ -1,14 +1,15 @@
 
 #include "main.h"
 #include "iap.h"
-#include "apm32e10x_iwdt.h"
 
 
 
 /* copy size bytes from src flash to dst flash (no overlap allowed);
  * dst is erased page-aligned first, source is read via direct pointer
  * between FMC operations (same pattern as flash_write_with_wdt);
- * IWDT refreshed per page (page erase+write ~ 50-100ms, WDT ~15s) */
+ * External WDT fed per page (page erase+write ~ 50-100ms; WDT ~15s).
+ * NOTE: the on-chip IWDT is NOT used in this project (main.c says so
+ * explicitly) — WDT_FEED() toggles the external chip via PB0. */
 int32_t hw_flash_copy(uint32_t srcAddr, uint32_t dstAddr, uint32_t size)
 {
   uint32_t copy_len = (size + FLASH_PAGE_SIZE - 1U) & (~(FLASH_PAGE_SIZE - 1U));

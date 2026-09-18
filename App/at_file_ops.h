@@ -28,7 +28,6 @@ typedef struct
   const char *filename;   /* e.g. "UFS:iot_update.bin" */
   int32_t     fd;         /* file descriptor from +QFOPEN, -1 if closed */
   uint32_t    file_size;  /* cached from +QFLST */
-  uint8_t     is_open;
 } AT_FILE_CTX_T;
 
 /* open file read-only (AT+QFOPEN), store fd into ctx */

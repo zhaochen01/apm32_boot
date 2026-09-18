@@ -5,15 +5,9 @@
 
 
 /* USART1 TX Buf */
-//uint8_t DMA_USART1_TxBuf[BufSize];
-
 /* USART2 RX Buf */
-uint8_t DMA_USART3_RxBuf[BufSize];
 
 
-
-DMA_Config_T dmaConfig_tx;
-DMA_Config_T dmaConfig_rx;
 
 
 
@@ -40,25 +34,10 @@ User_Uart_Config_T uart_cfg_list[] =
 		RCM_APB2_PERIPH_GPIOA, GPIOA, GPIO_PIN_10, GPIO_SPEED_50MHz, GPIO_MODE_IN_FLOATING
 	},
 	
-//	{ USART2, 9600, USART_MODE_TX_RX, RCM_APB1_PERIPH_USART2,\
-//		RCM_APB2_PERIPH_GPIOA, GPIOA, GPIO_PIN_2, GPIO_SPEED_50MHz, GPIO_MODE_AF_PP,\
-//		RCM_APB2_PERIPH_GPIOA, GPIOA, GPIO_PIN_3, GPIO_SPEED_50MHz, GPIO_MODE_IN_FLOATING
-//	},
-	
 	{ USART3, 115200, USART_MODE_TX_RX, RCM_APB1_PERIPH_USART3,\
 		RCM_APB2_PERIPH_GPIOB, GPIOB, GPIO_PIN_10, GPIO_SPEED_50MHz, GPIO_MODE_AF_PP,\
 		RCM_APB2_PERIPH_GPIOB, GPIOB, GPIO_PIN_11, GPIO_SPEED_50MHz, GPIO_MODE_IN_PU
 	},
-		
-//	{ UART4, 115200, USART_MODE_TX_RX, RCM_APB1_PERIPH_UART4,\
-//		RCM_APB2_PERIPH_GPIOC, GPIOC, GPIO_PIN_10, GPIO_SPEED_50MHz, GPIO_MODE_AF_PP,\
-//		RCM_APB2_PERIPH_GPIOC, GPIOC, GPIO_PIN_11, GPIO_SPEED_50MHz, GPIO_MODE_IN_FLOATING
-//	},
-//		
-//	{ UART5, 115200, USART_MODE_TX_RX, RCM_APB1_PERIPH_UART5,\
-//    RCM_APB2_PERIPH_GPIOC, GPIOC, GPIO_PIN_12, GPIO_SPEED_50MHz, GPIO_MODE_AF_PP,\
-//		RCM_APB2_PERIPH_GPIOD, GPIOD, GPIO_PIN_2,  GPIO_SPEED_50MHz, GPIO_MODE_IN_FLOATING
-//	},
 	
 };
 
@@ -108,27 +87,6 @@ void user_uart_init(void)
 }
 
 
-void USART3_RX_DMA_Init(void)
-{
-    /* DMA config */
-    dmaConfig_rx.peripheralBaseAddr = (USART3_BASE+0x04);
-    dmaConfig_rx.memoryBaseAddr = (uint32_t)DMA_USART3_RxBuf;
-    dmaConfig_rx.dir = DMA_DIR_PERIPHERAL_SRC;
-    dmaConfig_rx.bufferSize = BufSize;
-    dmaConfig_rx.peripheralInc = DMA_PERIPHERAL_INC_DISABLE;
-    dmaConfig_rx.memoryInc = DMA_MEMORY_INC_ENABLE;
-    dmaConfig_rx.peripheralDataSize = DMA_PERIPHERAL_DATA_SIZE_BYTE;
-    dmaConfig_rx.memoryDataSize = DMA_MEMORY_DATA_SIZE_BYTE;
-    dmaConfig_rx.loopMode = DMA_MODE_NORMAL;
-    dmaConfig_rx.priority = DMA_PRIORITY_MEDIUM;
-    dmaConfig_rx.M2M = DMA_M2MEN_DISABLE;
-
-    /* Enable DMA channel */
-    DMA_Config(DMA1_Channel3, &dmaConfig_rx);
-
-    /* Enable DMA */
-    DMA_Enable(DMA1_Channel3);
-}
 
 
 uint32_t uart_send_data(USART_T *usart, void *pdata, uint32_t len)

@@ -20,8 +20,7 @@
 typedef enum
 {
   AT_MATCH_EXACT    = 0,  /* line must start with target (after trimming spaces) */
-  AT_MATCH_CONTAINS = 1,  /* line must contain target as substring */
-  AT_MATCH_ANY      = 2   /* any complete line matches */
+  AT_MATCH_CONTAINS = 1   /* line must contain target as substring */
 } AT_MATCH_MODE_T;
 
 /* UART rx diagnostics (filled by at_take_fault_snapshot) */

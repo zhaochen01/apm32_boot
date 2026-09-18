@@ -111,7 +111,6 @@ int32_t at_file_open(AT_FILE_CTX_T *ctx, const char *filename)
 
   ctx->fd = -1;
   ctx->file_size = 0U;
-  ctx->is_open = 0U;
   ctx->filename = filename;
 
   (void)snprintf(cmd, sizeof(cmd), "AT+QFOPEN=\"%s\",2\r\n", filename);
@@ -131,7 +130,6 @@ int32_t at_file_open(AT_FILE_CTX_T *ctx, const char *filename)
   }
 
   ctx->fd = fd;
-  ctx->is_open = 1U;
   return AT_FILE_ERR_OK;
 }
 
@@ -243,7 +241,6 @@ int32_t at_file_close(AT_FILE_CTX_T *ctx)
   }
   if(ctx->fd < 0)
   {
-    ctx->is_open = 0U;
     return AT_FILE_ERR_OK;
   }
 
@@ -251,7 +248,6 @@ int32_t at_file_close(AT_FILE_CTX_T *ctx)
   ret = at_send_wait(cmd, "OK", AT_MATCH_EXACT, AT_FILE_CLOSE_TIMEOUT_MS);
 
   ctx->fd = -1;
-  ctx->is_open = 0U;
   return (ret == AT_ERR_OK) ? AT_FILE_ERR_OK : AT_FILE_ERR_CLOSE;
 }
 
