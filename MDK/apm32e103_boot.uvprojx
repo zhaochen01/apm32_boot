@@ -302,7 +302,7 @@
               <OCR_RVCT9>
                 <Type>0</Type>
                 <StartAddress>0x20000000</StartAddress>
-                <Size>0x1f800</Size>
+                <Size>0x1f000</Size>
               </OCR_RVCT9>
               <OCR_RVCT10>
                 <Type>0</Type>
@@ -362,16 +362,16 @@
             </VariousControls>
           </Aads>
           <LDads>
-            <umfTarg>1</umfTarg>
+            <umfTarg>0</umfTarg>
             <Ropi>0</Ropi>
             <Rwpi>0</Rwpi>
             <noStLib>0</noStLib>
             <RepFail>1</RepFail>
-            <useFile>0</useFile>
+            <useFile>1</useFile>
             <TextAddressRange>0x08003000</TextAddressRange>
             <DataAddressRange>0x20000000</DataAddressRange>
             <pXoBase></pXoBase>
-            <ScatterFile></ScatterFile>
+            <ScatterFile>.\apm32e103_boot.sct</ScatterFile>
             <IncludeLibs></IncludeLibs>
             <IncludeLibsPath></IncludeLibsPath>
             <Misc></Misc>
@@ -428,6 +428,11 @@
               <FileName>upgrade_ctrl.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\App\upgrade_ctrl.c</FilePath>
+            </File>
+            <File>
+              <FileName>ram_flash.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\App\ram_flash.c</FilePath>
             </File>
           </Files>
         </Group>

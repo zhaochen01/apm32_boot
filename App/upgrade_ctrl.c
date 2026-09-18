@@ -26,6 +26,7 @@
 #include "lte_modem.h"
 #include "iap.h"
 #include "bsp_delay.h"
+#include "ram_flash.h"   /* ram_flash_program()：RAM 常驻的 Flash 擦写例程 */
 #include "apm32e10x_iwdt.h"
 
 #include <string.h>
@@ -199,6 +200,142 @@ static int32_t upgrade_preserve_backup(const UPGRADE_CTX_T *ctx)
   return 0;
 }
 
+/*
+ * boot 自升级：读 UFS 的 BOOT_UPDATE_FILE_NAME -> 写 A 槽。
+ *
+ * 为什么在升级 boot 里做（而不是 APP）：这里已经有整套 QFREAD 机制；
+ * 而 APP 侧没有 raw 接收能力。
+ *
+ * 关键顺序（每一步都不能颠倒）：
+ *   ① 先把整个镜像读进 RAM 并自检 —— 之后 A 槽会被擦掉，不能再从 Flash 取东西
+ *   ② 校验镜像的向量表确实指向 0x08003000（挡住链接地址不对的固件）
+ *   ③ 把当前 A 存档到 B（纯 Flash 拷贝，写 B 不重叠）
+ *   ④ 交给 RAM 例程擦写 A —— 它永不返回
+ *
+ * 掉电安全：
+ *   ②之前掉电 -> A 完好，下次重来
+ *   ③之后掉电 -> A 可能半写 -> 引导区判 A 无效 -> 若 APP 有效则跳 APP，
+ *                由 APP 从 B 把旧 boot 拷回（见 IoT-4G-v2 的 boot 修复逻辑）
+ */
+static int32_t boot_image_ok(const uint8_t *img, uint32_t size)
+{
+  uint32_t sp = *(const uint32_t *)img;
+  uint32_t pc = *(const uint32_t *)(img + 4u);
+
+  if(size < 8u || size > BOOT_SLOT_MAX_IMAGE) return 0;
+  if(sp < 0x20000000u || sp > 0x2001F800u) return 0;
+  if(pc < BOOT_A_ADDR || pc > (BOOT_A_ADDR + BOOT_SLOT_MAX_IMAGE)) return 0;
+  if((pc & 1u) == 0u) return 0;
+  return 1;
+}
+
+static void upgrade_self_run(void)
+{
+  AT_FILE_CTX_T fc;
+  uint32_t off = 0u;
+  uint32_t img_size = 0u;
+  uint32_t crc = 0u;
+
+  printf("[boot-self] reading %s from module\r\n", BOOT_UPDATE_FILE_NAME);
+
+  memset(&fc, 0, sizeof(fc));
+  fc.fd = -1;
+
+  /* ---- ① 从 UFS 读整个镜像进 RAM（复用 40KB 的 up_file_buf）---- */
+  if(at_file_open(&fc, BOOT_UPDATE_FILE_NAME) != AT_FILE_ERR_OK) {
+    printf("[boot-self] open %s failed\r\n", BOOT_UPDATE_FILE_NAME);
+    upgrade_abort();
+  }
+  if(at_file_get_size(&fc) != AT_FILE_ERR_OK) {
+    printf("[boot-self] QFLST failed\r\n");
+    (void)at_file_close(&fc);
+    upgrade_abort();
+  }
+  img_size = fc.file_size;
+
+  if(img_size == 0u || img_size > BOOT_SLOT_MAX_IMAGE) {
+    printf("[boot-self] bad image size %lu (max %lu)\r\n",
+           (unsigned long)img_size, (unsigned long)BOOT_SLOT_MAX_IMAGE);
+    (void)at_file_close(&fc);
+    upgrade_abort();
+  }
+
+  while(off < img_size) {
+    uint32_t chunk = img_size - off;
+    uint32_t actual = 0u;
+
+    if(chunk > LTE_READ_CHUNK_SIZE) chunk = LTE_READ_CHUNK_SIZE;
+
+    if(at_file_read(&fc, up_file_buf + off, LTE_READ_CHUNK_SIZE,
+                    chunk, &actual, UPGRADE_QFREAD_TIMEOUT_MS) != AT_FILE_ERR_OK) {
+      printf("[boot-self] QFREAD fail at offset %lu\r\n", (unsigned long)off);
+      (void)at_file_close(&fc);
+      upgrade_abort();
+    }
+    off += actual;
+  }
+  (void)at_file_close(&fc);
+  printf("[boot-self] image read ok, %lu bytes\r\n", (unsigned long)img_size);
+
+  /* ---- ② 镜像自检：向量表必须指向 A 槽（挡住链接地址不对的固件）---- */
+  if(!boot_image_ok(up_file_buf, img_size)) {
+    printf("[boot-self] image vector check FAILED (wrong link address?)\r\n");
+    WDT_FEED();
+    (void)at_file_delete(BOOT_UPDATE_FILE_NAME);   /* 坏件删掉，断掉重装环 */
+    upgrade_abort();
+  }
+
+  crc = CRC32(up_file_buf, img_size);
+  printf("[boot-self] image crc=0x%08lX\r\n", (unsigned long)crc);
+
+  /* 与云端下发时写进 Upgrade_t 的参数比对 —— 装 APP 那条路径同款判据
+   * （upgrade_ctrl.c 的 expect_crc）。这一步必须在动 A 槽之前：不比对的话，
+   * UFS 里的坏文件会先把 A 擦掉再写进去，虽然能靠"引导区判槽无效 ->
+   * APP 从 B 拷回来"自愈，但白折腾一轮，且这期间设备没有可用的 boot。 */
+  if(img_size != upgrade.size || crc != upgrade.crc) {
+    printf("[boot-self] param mismatch: got %lu/0x%08lX, expect %lu/0x%08lX\r\n",
+           (unsigned long)img_size, (unsigned long)crc,
+           (unsigned long)upgrade.size, (unsigned long)upgrade.crc);
+    WDT_FEED();
+    (void)at_file_delete(BOOT_UPDATE_FILE_NAME);   /* 坏件删掉，断掉重装环 */
+    upgrade_abort();                               /* 写 FAILED 后复位 */
+  }
+
+  /* ---- ③ 当前 A 存档到 B（回退源）---- */
+  printf("[boot-self] archiving A -> B\r\n");
+  WDT_FEED();
+  if(hw_flash_copy(BOOT_A_ADDR, BOOT_B_ADDR, BOOT_SLOT_SIZE) != 0) {
+    printf("[boot-self] archive A->B failed\r\n");
+    upgrade_abort();
+  }
+
+  /* ---- ④ 清升级请求 + 记结果：必须在 RAM 例程复位之前写 ----
+   * 不清 0x3B 的话，新 boot 下次启动又读到它 -> 再读 UFS 再装一遍 ->
+   * 无限重装。status=OK 顺带给 APP 依据，上报 upgrade_result state=3。
+   * 这里只能走 iap_state_save()（只落盘不复位）——
+   * iap_upgrade_state_save() 内部会 NVIC_SystemReset()，
+   * 用它就走不到下面的 RAM 例程了。 */
+  upgrade.flag     = 0x5A;
+  upgrade.status   = UPGRADE_STATUS_OK;
+  upgrade.up_count = 0U;
+  iap_state_save();
+
+  /* ---- ⑤ 置试用计数：新 boot 起不来时引导区能退到"跳 APP 去修" ----
+   * 必须写在这里 —— RAM 例程只碰 Flash/GPIO，不碰 BAKPR。
+   * 引导区每次启动 +1，超过 BOOT_TRIAL_LIMIT 就放弃 A 槽、返回 0，
+   * 上层据此跳 APP，由 APP 把 B 槽的旧 boot 拷回 A 完成回退。
+   * 新 boot 正常跑起来后，由 APP 首次进初始化链时清 0。 */
+  BAKPR_ConfigBackupRegister(BOOT_TRIAL_REG, 1u);
+
+  /* ---- ⑥ 交给 RAM 例程擦写 A；永不返回 ---- */
+  printf("[boot-self] programming slot A from RAM\r\n");
+  ram_flash_program(BOOT_A_ADDR, BOOT_SLOT_SIZE, up_file_buf, img_size, crc,
+                    &Hw_WDT_Cfg.port->ODATA, Hw_WDT_Cfg.pin);
+
+  /* 不会到这里 */
+  for(;;) { }
+}
+
 void upgrade_run(const UPGRADE_CTX_T *ctx)
 {
   AT_FILE_CTX_T file_ctx;
@@ -222,6 +359,20 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
 
   memset(&file_ctx, 0, sizeof(file_ctx));
   file_ctx.fd = -1;
+
+  /* ================= boot 自升级（0x3B）================= */
+  if(ctx->action == UPGRADE_ACTION_SELF)
+  {
+    /* 模组必须先起来 —— 下面是唯一一次 lte_modem_init 调用，而且在 0x3A
+     * 分支里，SELF 分支在它之前。漏了这一步 AT 通道根本不通，症状是
+     * [boot-self] open UFS:boot_update.bin failed（文件其实存在）。 */
+    if(lte_modem_init(&LTE_MODEM_CFG_EG800K) != LTE_MODEM_ERR_OK)
+    {
+      printf("[boot-self] modem init failed, abort\r\n");
+      upgrade_abort();
+    }
+    upgrade_self_run();   /* 永不返回 */
+  }
 
   /* ================= download phase (0x3A only) ================= */
   if(ctx->action == UPGRADE_ACTION_NETWORK)

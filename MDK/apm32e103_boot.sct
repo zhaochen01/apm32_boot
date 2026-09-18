@@ -1,0 +1,23 @@
+; *************************************************************
+; *** 升级 boot（apm32_boot_coll）手写 scatter                ***
+; *** 关键：ER_RAMFUNC 承载 ram_flash.c 的 .ramfunc 段，      ***
+; ***       启动时由 __main 从 Flash 拷到 RAM 执行            ***
+; *************************************************************
+
+LR_IROM1 0x08003000 0x00006000  {      ; 加载区 = 24KB boot 槽
+  ER_IROM1 0x08003000 0x00005E00  {    ; 代码区（根区，必须 exec==load）
+   *.o (RESET, +First)
+   *(InRoot$$Sections)
+   .ANY (+RO)
+   .ANY (+XO)
+  }
+  ER_RAMFUNC 0x2001F000 0x00000800  {  ; RAM 执行区（boot 自升级的 Flash 擦写例程）
+   *(.ramfunc)
+  }
+  RW_IRAM1 0x20000000 0x0001F000  {    ; RW/ZI 数据
+   .ANY (+RW +ZI)
+  }
+  RW_IRAM2 0x2001F800 UNINIT 0x00000800  {
+   .ANY (+RW +ZI)
+  }
+}

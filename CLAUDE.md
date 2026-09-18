@@ -45,6 +45,8 @@ main.c
   │                         安装参数由 ctx 带回
   ├── upgrade_run(ctx)    → 升级状态机（备份 + 下载 + 校验 + 提交 / 回退）
   │     ├── upgrade_preserve_backup() → 复制 A 槽 → B 槽并回读校验，成功后立即落盘
+  │     ├── upgrade_self_run()    → boot 自升级（0x3B）：UFS 镜像 → RAM → 存档 A→B
+  │     │                             → 写结果 → BAKPR 试用计数 → ram_flash_program()（永不返回）
   │     ├── lte_modem_init()      → 4G 模块上下电、RDY 等待（可重试）、ATE0
   │     ├── at_file_open/get_size/read/close → QFOPEN/QFLST/QFREAD/QFCLOSE
   │     ├── at_file_delete()      → QFDEL（安装成功后清理模组 UFS 里的固件）
@@ -70,6 +72,7 @@ main.c
   hw_flash.c/h   → FMC 页擦除 / 字写入 / 字节读取
   iap.c/h        → 启动决策、槽判据、升级元数据初始化/保存、结构体定义
   hw_board.c/h   → RT-Thread 板级信息（可能与 APP 共享，不在 boot 编译内）
+  ram_flash.c/h  → RAM 常驻的 Flash 擦写例程（`.ramfunc` 段）：boot 自升级专用
   http.c/h       → 占位文件（空实现，预留给将来使用）
 ```
 
@@ -92,17 +95,21 @@ main.c
 ### 双区策略（A/B 双 APP 槽）
 
 两个 214KB 固件槽（A @ `0x0800F000`、B @ `0x08044800`）提供回退保护。
-**跳 APP 由引导区负责**，本工程只做"装 APP / 修 APP"，三个出口全部终止：
+**跳 APP 由引导区负责**，本工程只做"装 APP / 修 APP / 装自己"，出口全部终止：
 
 - **路径① `flag == 0x3A`（APP 主动升级）**：`upgrade_preserve_backup()` 先把 A 槽
   复制到 B 槽并回读校验（失败则 abort，A 槽保持不动，**该步成功后立即落盘 `fw[1]`**，
   堵住"下载中途掉电丢回退能力"的窗口）；再擦 A 槽、QFREAD 40KB 分块**直接下载进 A 槽**；
-  CRC 通过 → 删模组 UFS 文件 → 写 `fw[0]`=新 + `status=OK` + `flag=0x5A` → 复位。
+  CRC 通过 + 向量表 sanity → 写 `fw[0]`=新 + `status=OK` + `flag=0x5A` → 复位
+  （模组 UFS 文件**不删**，见"模组 UFS 固件文件的生命周期"）。
 - **路径② 被动修复（`flag != 0x3A` 且 A 槽无效）**：B 槽有效 → 就地接管回退
   （拷贝 B → A，写 `fw[0]` + `status=FAILED` + `flag=0x5A` → 复位）；
   B 也无效 → `IAP_ACT_NONE`，由 main 探测模组 UFS，没有文件则 park。
 - **路径③ APP 有效且无升级请求**：理论不可达（引导区不会把我们跳进来）。
   真发生了说明**判据漂移**，熔断为 park —— 复位必然成环。
+- **路径④ `flag == 0x3B`（boot 自升级）**：`upgrade_self_run()` —— 把模组 UFS 的
+  `boot_update.bin` 装进 boot A 槽（本工程自己）。详见下文"boot 自升级"。
+  **路径②的判断对 0x3B 不适用**：0x3B 走 case 分支，不会落到 default 的被动修复。
 
 **下载重试**：`UPGRADE_MAX_DL_RETRIES = 2`；耗尽 → 写 `flag=0xAA` + `status=FAILED`
 → 下次启动走回退。
@@ -174,6 +181,53 @@ APP 下载前（app_ota.c Step 1）→ QFDEL 删旧
 （保留删除点 1 的副作用：装完不删后，下次 OTA 的 Step 1 能正常删到文件，
 `QFDEL CME error` 那条噪音日志自然消失。）
 
+**boot 自升级的 `boot_update.bin` 走同一套生命周期**：APP 在 `app_ota.c` Step 1
+按目标文件名 QFDEL 清残留，升级 boot 在向量表自检失败 / 与 `upgrade.size/crc`
+比对失败时删除（删除点 2 的自升级版），安装成功同样不删。
+
+### boot 自升级（A 槽自升级 + B 槽回退源，2026-09-17）
+
+升级 boot 自己也能远程升级：APP 把新 boot 镜像下载到模组 UFS 的 `boot_update.bin`
+（与 APP 的 `iot_update.bin` 可共存），写 `Upgrade_t.flag = 0x3B`（`UPGRADE_ACTION_SELF`），
+引导区按 `flag ∈ {0x3A, 0x3B}` 把我们跳进 A 槽。
+
+`iap_init()` 认 `0x3B` → 返回 `IAP_ACT_INSTALL` + `UPGRADE_ACTION_SELF` → `upgrade_self_run()`：
+
+| # | 动作 | 要点 |
+|---|------|------|
+| ① | `QFREAD` 整个镜像进 RAM | 复用 40KB `up_file_buf`；长度上限 `BOOT_SLOT_MAX_IMAGE`（24564） |
+| ② | 镜像向量表自检（`boot_image_ok()`） | MSP 落 SRAM、复位向量落 A 槽、Thumb 位 = 1 —— 挡住链接地址不对的固件 |
+| ③ | A 槽整槽存档到 B 槽 | `hw_flash_copy()` 纯 Flash 拷贝，**这是唯一的回退源** |
+| ④ | 写 `flag=0x5A` + `status=UPGRADE_STATUS_OK(0x02)` | 走 `iap_state_save()`，**只落盘、不复位** |
+| ⑤ | 置试用计数 `BAKPR_DATA17 = 1` | RAM 例程只碰 Flash/GPIO、不碰 BAKPR，只能写在这里 |
+| ⑥ | `ram_flash_program()` 擦写 A 槽 | RAM 常驻例程，末尾写 `SCB->AIRCR` 复位，**永不返回** |
+
+**为什么 ④ 必须在 ⑥ 之前**：不清 `0x3B` 的话，新 boot 下次启动又读到它 → 再读 UFS 再装一遍 → **无限重装**。
+**为什么用 RAM 例程**：本工程跑在 A 槽里，自升级要擦的正是 A 槽 —— 擦除那一刻 Flash 里的代码就没了，只有 RAM 里的副本能把剩下的擦除 + 写入跑完（IAP 经典做法）。
+失败路径统一走 `upgrade_abort()`（写 `flag=0xFF` + `status=FAILED` 后复位）；向量表自检 / 与 `upgrade.size/crc` 比对失败的固件会被 `at_file_delete()` 删掉，断掉重装环。
+
+**RAM 例程（`App/ram_flash.c` / `App/ram_flash.h`）**
+
+- 调用约定（破坏任意一条都会变砖）：`src` 镜像必须**已在 RAM**；`crc` 由调用方先算好（例程内不能再调 `CRC32()`，那在 Flash 里）；**永不返回**；只能写不是自己正在跑的槽
+- 例程内不访问任何全局变量（看门狗用调用方算好的 `&Hw_WDT_Cfg.port->ODATA` + `Hw_WDT_Cfg.pin`），字面量池随段一起进 RAM —— 否则擦完 A 槽后再取全局地址/字面量会 HardFault
+- 段归属由手写 scatter `MDK/apm32e103_boot.sct` 的 `ER_RAMFUNC 0x2001F000 0x800 { *(.ramfunc) }` 承载，启动时由 `__main` 从 Flash 拷到 RAM
+- ⚠️ **`MDK/apm32e103_boot.uvprojx` 的 `<umfTarg>` 必须为 `0`** —— 它是 "Use Memory Layout from Target Dialog"，为 `1` 时 Keil 会无视手写的 `<ScatterFile>`，每次构建重新生成自己的 scatter 覆盖到 `Objects\`，`.ramfunc` 就被 `.ANY (+RO)` 抓进 Flash 而不是 RAM
+
+**栈 1KB → 4KB**（启动文件 `Stack_Size 0x400` → `0x1000`）：原布局里 STACK(`0x2000AD00..0x2000B100`) 紧贴 40KB 镜像缓冲 `up_file_buf`(`0x20000C0C..0x2000AC0C`) 的尾部，中间只有 244 字节空隙，栈一溢出就静默改掉即将烧进 boot 槽的镜像；boot 有 81KB RAM 没用上，扩到 4KB 零成本。
+
+**试用计数 `BAKPR_DATA17`**（`BOOT_TRIAL_REG`，与引导区 `App/boot.c` 同址）：
+
+| 角色 | 位置 | 行为 |
+|------|------|------|
+| 写者 | 本工程 `upgrade_self_run()` | 自升级成功时置 `1`（"新 boot 进入试用期"） |
+| 递增者 | 引导区 `boot_pick_stage2()` | 每次启动发现非 `0`（且非 `0xFFFF`）就 `+1`；`> BOOT_TRIAL_LIMIT(5)` 放弃 A 槽、返回 0 → 上层跳 APP |
+| 清者 | APP `app_ota_boot_slot_check()` | 只有确认能跑起来才清 `0` |
+
+新 boot 即使 CRC 完好也可能一跑就崩 —— 镜像本身查不出毛病，**计数超限是唯一证据**：APP 发现计数 `> 5` 时，即便 CRC 完好也强制从 B 槽回退 A。
+（必须清：不清的话计数只增不减，5 次重启后引导区永久放弃 A 槽，boot 彻底报废。）
+
+**槽常量**（与引导区 `App/boot.h`、`tools/postbuild_boot_slot.py`、APP 侧 `IoT-4G-v2/App/app_ota.h`/`app_ota.c` 逐字节一致）：`BOOT_SLOT_SIZE`(24576)、`BOOT_SLOT_MAX_IMAGE`(24564)、`BOOT_A_ADDR`/`BOOT_B_ADDR`、`BOOT_UPDATE_FILE_NAME`(`"UFS:boot_update.bin"`)、`UPGRADE_ACTION_SELF`(0x3B)。
+
 ### 重试模式
 
 下载（0x3A）和保底/回退复制（0xAA）阶段均使用显式的 while 循环重试计数器（`dl_retry`/`app_retry`），上限为 5（`UPGRADE_MAX_DL_RETRIES`/`UPGRADE_MAX_APP_RETRIES`）。不使用 goto。
@@ -226,7 +280,7 @@ __enable_irq();
 |---------|------|---------|
 | 0x08000000 | 12KB | 引导区 Stage-1（独立工程 `apm32_e103_bootstrap`，永不变） |
 | **0x08003000** | **24KB** | **升级 boot A 槽 ← 本工程的链接地址** |
-| 0x08009000 | 24KB | 升级 boot B 槽（备份槽，暂无自升级写入者） |
+| 0x08009000 | 24KB | 升级 boot B 槽（**A 槽的自升级回退源**，由 `upgrade_self_run()` 在写 A 前整槽拷贝；引导区不会跳它，只被拷回 A） |
 | 0x0800F000 | 214KB | APP A 槽（`APP_ADDR`，固定链接地址） |
 | 0x08044800 | 214KB | APP B 槽（`UP_BACKUP_ADDR`，最后一个已知良好版本） |
 | 0x0807E000 | 2KB | 升级元数据（`Upgrade_t`）← 本工程独享整页 |
@@ -247,7 +301,9 @@ Flash 页大小：2048 字节（`FLASH_PAGE_SIZE`）；固件大小上限 214KB
 
 **四个地方必须逐字节一致，改这里 = 改协议**：引导区 `boot_stage2_valid_v2()`、
 `tools/postbuild_boot_slot.py`、`iap.h` 的 `APP_MAX_SIZE`/`APP_RAM_*`、
-引导区 `boot.h` 的 `BOOT_*`。
+引导区 `boot.h` 的 `BOOT_*`。（boot 槽容量与尾部偏移在 APP 侧另有一份副本：
+`IoT-4G-v2/App/app_ota.h` 的 `APP_OTA_BOOT_*` 与 `app_ota.c` 的 `OTA_BOOT_*`，
+同样要跟着改。）
 
 引导区保留**旧布局回退判据**（末尾 4 字节 = 整段 CRC），使引导区与升级 boot
 可以**分批烧录**，中间断电不变砖（两侧误判概率约 2⁻³²）。
@@ -257,7 +313,8 @@ Flash 页大小：2048 字节（`FLASH_PAGE_SIZE`）；固件大小上限 214KB
 ```c
 // Upgrade_t @ UPGRADE_ADDR (0x0807E000)，紧凑打包
 typedef struct {
-  uint8_t   flag;        // 0x3A=升级请求  0x5A=无请求/已提交  0xAA=回退请求  0xFF=空白
+  uint8_t   flag;        // 0x3A=APP 升级请求  0x3B=boot 自升级请求  0x5A=无请求/已提交
+                         //   0xAA=回退请求  0xFF=空白
   uint8_t   up_count;    // 废弃（trial 已取消），恒 0
   uint8_t   fw_flag;     // 保留字段，固定为 1
   uint8_t   status;      // 升级结果回传：0x00=无  0x02=安装成功  0x03=安装失败
@@ -301,7 +358,7 @@ typedef struct {
 | `at_file_get_size()` | `AT+QFLST` | 获取文件大小，通过 `strrchr` 校验 |
 | `at_file_read()` | `AT+QFREAD` | 读取分块（最大 40KB），CONNECT 头 + 原始数据流经传输层 |
 | `at_file_close()` | `AT+QFCLOSE` | 关闭文件描述符 |
-| `at_file_delete()` | `AT+QFDEL` | 删除 UFS 文件（安装成功后清理固件，失败忽略） |
+| `at_file_delete()` | `AT+QFDEL` | 删除 UFS 文件（**只删已证明不可用的**：向量表不匹配 / 下载重试耗尽），失败忽略 |
 | `at_send_wait()` | 通用 | 发送任意 AT 命令，等待响应子串（EXACT/CONTAINS/ANY） |
 
 ## 关键全局变量
@@ -333,6 +390,8 @@ typedef struct {
 5. **CRC 来源取决于动作类型**：
    - 0x3A：预期大小/CRC 来自 `upgrade.size`/`upgrade.crc`（APP 提供）
    - 0xAA / 自动回退：预期大小/CRC 来自 `upgrade.fw[1].size`/`.crc`（保底区元数据，Boot 在保底复制时更新）
+   - 0x3B（boot 自升级）：同样来自 `upgrade.size`/`upgrade.crc`（APP 提供），只是上限换成
+     boot 槽 —— 判据 `expect_params_ok_boot()` 用 `BOOT_SLOT_MAX_IMAGE`(24564) 而非 `APP_MAX_SIZE`
 6. **处处喂狗**：片内 IWDT 已移除，改由**外部 WDT**承担（PB0 翻转，`WDT_FEED()`）。每次 Flash 操作、`at_wait()`/`at_wait_raw_done()` 轮询、5 秒恢复等待、模组 RDY 等待都必须喂。漏掉一次就会静默复位。
 7. **`Delay_ms()` 依赖**：依赖 `SysTick_Handler` 递减 `cntMs`。若 `SysTick_Handler` 损坏或向量表未建立，`Delay_ms()` 将永远挂起 → 看门狗复位。
 8. **`hw_board.c` 双重用途**：该文件引用了 RT-Thread API（`rt_kprintf`、`rt_thread_create`、`INIT_DEVICE_EXPORT`），并定义了与 `main.c` 中相同的 `hw_gpio_init()`/`Hw_WDT_Cfg`。它似乎是 APP 工程共享的代码——修改前请确认它是否真的参与 boot loader 编译。
@@ -374,3 +433,18 @@ typedef struct {
     - **PC0 → PCIE_RESET：须保持高电平 = 模组运行态**。`lte_modem_init()` 上电前先置 PC0 高，此后一直保持；不控制此引脚模块会停在复位态
     - **USART3 = PB10/PB11 默认映射，无需重映射**。注意别与 Collector-4G 参考工程的 UART4（PC10/PC11，GPS 相关）混淆
     - **RDY 后延迟约 1500ms 再发 AT**：RDY 只是 UART 就绪信号，AT 通道尚未就绪时首条 AT（ATE0）会被吞（参考工程实测 500ms 不够）
+
+17. **boot 自升级（0x3B）必须自己初始化模组（2026-09-17 实测踩坑）**：
+    `upgrade_run()` 里唯一一次 `lte_modem_init()` 在 **0x3A 分支内部**，而
+    `UPGRADE_ACTION_SELF` 的分支排在它**之前**。漏掉这一步 AT 通道根本没通，
+    症状是 `[boot-self] open UFS:boot_update.bin failed` —— 而文件其实存在
+    （用 APP 的 `atx AT+QFOPEN="UFS:boot_update.bin",2` 手工能开，ret=0）。
+    SELF 分支开头必须自己调一次 `lte_modem_init(&LTE_MODEM_CFG_EG800K)`。
+18. **`ctx->expect_*` 是共用参数检查的输入（2026-09-17 实测踩坑）**：
+    `upgrade_run()` 开头有一段**所有动作共用**的校验
+    （`expect_size==0 || >APP_MAX_SIZE || expect_crc==0xFFFFFFFF` -> abort），
+    它排在 SELF 分支**之前**。`iap_init()` 的每个 case 都必须把
+    `ctx->expect_size`/`ctx->expect_crc` 一起填上 —— 只设 `ctx->action`
+    会让这段检查恒判 invalid，症状是 `expect param invalid, abort`，
+    而此时 `iap_init` 自己的 `expect_params_ok_boot()` 明明是通过的。
+    这两个坑（17/18）编译期都发现不了，只有端到端跑一次才会暴露。

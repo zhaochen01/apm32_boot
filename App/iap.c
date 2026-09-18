@@ -116,6 +116,15 @@ static void drop_request(void)
   iap_state_flush();
 }
 
+/* boot 自升级的参数可信性：上限是 boot 槽容量，不是 APP 的 214KB */
+static int32_t expect_params_ok_boot(uint32_t size, uint32_t crc)
+{
+  if(size == 0u || size == 0xFFFFFFFFu) return 0;
+  if(size > BOOT_SLOT_MAX_IMAGE)        return 0;
+  if(crc == 0u || crc == 0xFFFFFFFFu)   return 0;
+  return 1;
+}
+
 /* 安装参数可信性：空片 / 越界一律拒绝，绝不拿坏参数去擦运行区 */
 static int32_t expect_params_ok(uint32_t size, uint32_t crc)
 {
@@ -218,6 +227,24 @@ int32_t iap_init(UPGRADE_CTX_T *ctx)
     /* 0x3A 但参数不可信（空片 0xFFFFFFFF / 越界）—— 绝不能复位：
      * 复位后引导区仍读到 0x3A，又跳回本函数，成环。 */
     printf("0x3A with bad params -> drop request\r\n");
+    drop_request();
+    return app_ok ? IAP_ACT_RESUME_APP : IAP_ACT_NONE;
+
+  /* ============ boot 自升级请求（0x3B）============
+   * 参数校验走同一套：APP 已把云端下发的 size/crc 写进顶层字段，
+   * 这里只需确认可信（镜像实际长度上限由 upgrade_self_run 再检一次）。 */
+  case 0x3B:
+    if(expect_params_ok_boot(upgrade.size, upgrade.crc))
+    {
+      ctx->action      = UPGRADE_ACTION_SELF;
+      /* expect_* 必须一起填：upgrade_run() 开头有个【共用】的参数检查
+       * （expect_size==0 即 abort），它排在本 case 的 SELF 分支之前。
+       * 只设 action 不设 expect_* -> 恒被判 invalid -> boot 自升级永远 abort。 */
+      ctx->expect_size = upgrade.size;
+      ctx->expect_crc  = upgrade.crc;
+      return IAP_ACT_INSTALL;
+    }
+    printf("0x3B with bad params -> drop request\r\n");
     drop_request();
     return app_ok ? IAP_ACT_RESUME_APP : IAP_ACT_NONE;
 
