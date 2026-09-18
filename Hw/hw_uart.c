@@ -89,9 +89,16 @@ void user_uart_init(void)
 
 
 
-uint32_t uart_send_data(USART_T *usart, void *pdata, uint32_t len)
+/* TXBE 等待上限。正常情形下写 DR 后一个字节时间（115200 约 87us）就置位，
+ * 这个上界给足余量；真卡住时报错返回而不是无限自旋 —— 自旋不喂狗 -> 外部
+ * WDT 拉 NRST -> 重启后重走同一条路 -> 复位环。
+ * 本函数是所有 printf 与所有 AT 发送的唯一通道。 */
+#define UART_TXBE_WAIT_MAX   200000u
+
+int32_t uart_send_data(USART_T *usart, void *pdata, uint32_t len)
 {
 	uint32_t i;
+	uint32_t guard;
   if (len < 1) return -1;
   if (pdata == NULL) return -1;
 
@@ -102,7 +109,15 @@ uint32_t uart_send_data(USART_T *usart, void *pdata, uint32_t len)
 		USART_TxData(usart, *(uint8_t *)pdata++ );
 	
 		/* wait for the data to be send  */
-		while (USART_ReadStatusFlag(usart, USART_FLAG_TXBE) == RESET);
+		guard = UART_TXBE_WAIT_MAX;
+		while((USART_ReadStatusFlag(usart, USART_FLAG_TXBE) == RESET) && (guard != 0u))
+		{
+			guard--;
+		}
+		if(guard == 0u)
+		{
+			return -1;              /* TX 卡死：报错，别无限自旋 */
+		}
 	}
 
   return 0;

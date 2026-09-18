@@ -9,7 +9,7 @@ APM32E103 Boot Loader：通过 Quectel CAT-1 4G 模块进行远程固件升级�
 - **MCU**：APM32E103RE（ARM Cortex-M3，72MHz，512KB Flash / 128KB SRAM）
 - **4G 模块**：Quectel CAT-1 系列（EC800/EG800K），AT 指令集
 - **编译器**：ARMCC（Keil MDK v5）；GCC 亦可通过 `#ifdef` 块支持
-- **版本**：v2.1.0.100（见 `Include/main.h:50` 的 `VERSION`）
+- **版本**：v2.2.0.102（**权威值在 `Include/main.h` 的 `VERSION`** —— 这份文档里的数字只是快照，改版本号时以文件为准）
 - **字符编码**：C 源码注释与字符串使用 GBK/GB2312
 
 ## 构建
@@ -134,6 +134,18 @@ Boot 写 `status`（`0x02`=安装成功 / `0x03`=安装失败），APP 下次启
 |---|---|---|---|
 | A（运行槽） | `slot_usable()` | 向量表 + （有记录时）全量 CRC | **放行**（首次 J-Link 裸烧） |
 | B（备份槽） | `slot_intact()` | **只验记录 + 全量 CRC** | **不可用**（没有备份就是没有） |
+
+> ⚠️ **"无记录"只认 `crc == 0xFFFFFFFF`**（2026-09-18 收窄）。
+> 原判据是 `!FW_VALID(fw)` —— 它把 `size` 为 `0` / `0xFFFFFFFF` / 越界也一并
+> 算作"无记录"，于是**放行**。可那三种是【记录损坏】，不是"没有记录"：
+> 放行等于跳过 CRC 校验跳进一段没验过的代码，坏了就是 HardFault → NRST →
+> 同样放行 → **无限复位环**。
+> 现在：`crc == 0xFFFFFFFF` 才放行；`size == 0 || size > APP_MAX_SIZE` 一律判无效。
+> **与引导区 `App/boot.c` 的 `boot_app_valid()` 必须逐条同构**（两处注释互指），
+> 只改一边会制造判据漂移 —— 那会撞上 `iap_init()` 的 PARK 熔断器（设备停住
+> 而不是跑 APP）。
+> `FW_VALID` 宏本身**没动** —— 它在 `slot_intact()`（B 槽"无记录=不可用"）
+> 和 `upgrade_preserve_backup()` 里的语义仍然正确。
 
 > ⚠️ **B 槽绝不能套用 `slot_usable()`**。B 存的是 A 槽镜像的**拷贝**，
 > 它的复位向量指向 A 的链接地址（`0x0800F000`），永远落不进 B 槽范围
@@ -274,6 +286,19 @@ hw_flash_erase(addr, size);
 hw_flash_write(addr, data, size);
 __enable_irq();
 ```
+
+**返回值（2026-09-18 起才如实报错）**：`hw_flash_erase()` 原返回**页数**、
+`hw_flash_write()` 恒返回 `0`，`FMC_ErasePage`/`FMC_ProgramWord` 的结果一律
+丢弃 —— 擦写失败对调用方完全不可见（同文件的 `hw_flash_copy()` 反而检查了，
+不一致）。现在两者都返回 `0` 成功 / `-1` 失败。
+
+> ⚠️ **`iap_state_flush()` 失败时绝不能复位**。元数据没真正写进去 = 持久状态
+> 没改变，而调用方紧接着 `NVIC_SystemReset()`：引导区读到旧的 `flag`（比如
+> 还是 `0x3A`）会把我们跳回来，每轮重来一次完整下载 → **无限重装环**。
+> 它现在**回读校验**（`memcmp` Flash 与 RAM 中的 `upgrade`），不通过就 park。
+> 用回读而不是查返回码：回读是唯一能同时覆盖"擦除失败"和"写入失败"的判据。
+> 违反 `iap.c` 顶部不变量 1（"复位只允许发生在持久状态已改变之后"）的路径
+> 一律 park，绝不复位。
 
 `at_transport.c` 中读取/写入队列状态（ISR 会修改）时也使用同样的模式——`at_wait()` 消费队列时通过 `__disable_irq()` 保护队列指针。
 
@@ -434,6 +459,26 @@ typedef struct {
     改一边必须同时改另一边 —— 两边一旦分歧，"引导区判无效 → 跳升级 boot → 升级 boot
     判有效 → 复位"就是无限复位环。`iap.c` 里那条 `verdict mismatch -> PARK` 分支是
     漂移的熔断器，**删不得**。
+    （2026-09-18：两边同步收窄了"无记录"的定义，见"两槽判据不一样"一节。）
+
+### 2026-09-18 稳定性批次（传输层 + Flash 原语）
+
+一次专查"闭环性"的审查修掉的 6 处。共同点：**都不是新写的 bug，而是临界区画小了
+或返回值被吞了**，且大多能在同文件里找到已经写对的范本。
+
+| 位置 | 问题 | 范本 |
+|---|---|---|
+| `at_transport.c` `at_wait()` | 队列满时 `head == tail`，消费者却在中打开中断**之后**才读 `entry->data`；ISR 正好写回刚取走的那个槽 → 撕读。修法：临界区内先 `memcpy` 到局部 | 无（本条是源码级修复） |
+| `at_transport.c` `at_transport_init()` | 重置 head/tail/count **无** `__disable_irq`。它会被 `lte_modem_reset()` 再次调用，那时模组还上电、中断还开着 | `at_flush_rx()` |
+| `at_transport.c` `at_flush_rx()` | `__enable_irq()` 早于 `hw_uart3_flush_rx()`，窗口内 ISR 入队的行活过 flush → 上条命令迟到的 `OK` 被当下条的响应 | 无 |
+| `at_transport.c` `parse_connect_len()` | 数字解析无溢出检测，超长串回绕成小值绕过上界 | `at_file_ops.c` 的 `parse_file_len()` |
+| `Hw/hw_flash.c` erase/write | `FMC_*` 返回值全丢，`hw_flash_write` 恒返回 0 | `hw_flash_copy()` |
+| `Hw/hw_uart.c` `uart_send_data()` | `while(TXBE == RESET);` 无超时无喂狗 —— 它是**所有 printf 与 AT 发送**的唯一通道 | 无 |
+
+> `uart_send_data()` 顺带把返回类型 `uint32_t` → `int32_t`：原实现已经在返回
+> `-1`（无符号下即 `0xFFFFFFFF`），调用方写 `if (ret < 0)` 会静默失效。
+> 与 IoT-4G-v2 那个 ARMCLANG 无符号 `char` 哨兵是同一类坑。
+
 
 13. **新增 4G 模块型号**：创建一个新的 `LTE_MODEM_CFG_T` 常量（如 `LTE_MODEM_CFG_XXX`）并传给 `lte_modem_init()` 即可——除非 AT 文件 API 有差异，否则无需其他改动。
 14. **备份槽不能用运行槽的判据**：见"双区策略"的对照表。这类"两个判据看着都

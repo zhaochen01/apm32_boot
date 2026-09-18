@@ -132,7 +132,17 @@ static int32_t parse_connect_len(const uint8_t *line, uint16_t len)
 
   while((*p >= '0') && (*p <= '9'))
   {
+    uint32_t prev = val;
+
     val = (val * 10U) + (uint32_t)(*p - '0');
+    /* 溢出保护：模组返回的行不可信。超长数字串会让 val 回绕成一个
+     * <= s_raw_buf_size 的小值，绕过调用点的上界检查，于是 raw 模式按
+     * 错误的 expect_len 启动 -> 提前报 raw_done -> 截断的数据被当成
+     * 一次成功读取交付。写法与 at_file_ops.c 的 parse_file_len 一致。 */
+    if(val < prev)
+    {
+      return -1;
+    }
     p++;
   }
 
@@ -180,6 +190,14 @@ void at_transport_init(void)
   cb.on_raw_done = at_on_raw_done;
   cb.on_fault = at_on_fault;
 
+  /* 关中断做整段重置：本函数会在升级失败后被 lte_modem_reset() 再次调用，
+   * 那时模组仍上电、USART3 中断还开着、可能仍在吐数据。开着中断重置
+   * head/tail/count，ISR 会在中途入队 -> 索引与计数不一致（孤儿槽 / 丢行）。
+   * at_flush_rx() 一直是关中断写的，照抄。
+   * hw_uart3_init() 内部同样要 memset(&s_uart3) 并开 NVIC，一并罩住；
+   * CPU 级中断在末尾 __enable_irq() 才放行。 */
+  __disable_irq();
+
   s_queue_head = 0U;
   s_queue_tail = 0U;
   s_queue_count = 0U;
@@ -195,6 +213,8 @@ void at_transport_init(void)
   s_fault_ne_cnt = 0U;
 
   hw_uart3_init(&cb);
+
+  __enable_irq();
 }
 
 int32_t at_send(const char *cmd)
@@ -231,13 +251,21 @@ int32_t at_wait(const char *target, AT_MATCH_MODE_T mode, uint32_t timeout_ms)
     while(s_queue_count > 0U)
     {
       AT_LINE_ENTRY_T *entry = &s_line_queue[s_queue_tail];
+      char line[AT_LINE_MAX_LEN];
+
       s_queue_tail = (s_queue_tail + 1U) % AT_LINE_QUEUE_SIZE;
       s_queue_count--;
+
+      /* 必须在临界区内把行拷出来再开中断。
+       * 队列满时 head == tail：本槽取走后 count 变 7，ISR 立刻就会往
+       * queue[head] 写 —— 而那正是刚被取走的这一个。留在中断打开的窗口里
+       * 读 entry->data，读到的会是被 memcpy 撕开的行。 */
+      memcpy(line, entry->data, sizeof(line));
       __enable_irq();
 
-      if(match_line(entry->data, target, mode) == 0)
+      if(match_line(line, target, mode) == 0)
       {
-        (void)strncpy(s_last_line, entry->data, AT_LINE_MAX_LEN - 1U);
+        (void)strncpy(s_last_line, line, AT_LINE_MAX_LEN - 1U);
         s_last_line[AT_LINE_MAX_LEN - 1U] = '\0';
         return AT_ERR_OK;
       }
@@ -271,6 +299,17 @@ int32_t at_send_wait(const char *cmd, const char *target,
 
 void at_flush_rx(void)
 {
+  /* 顺序要紧：先清 UART 侧的行装配状态，再清队列。
+   *
+   * 原顺序是反的（清队列 -> 开中断 -> hw_uart3_flush_rx）。中间那段窗口里
+   * ISR 可以把一行装配完并入队，而末尾那句只清 UART 侧、不清队列 —— 那一行
+   * 就活过了这次 flush。后果：上一条命令迟到的 "OK" 被当成下一条命令的响应，
+   * QFCLOSE / QFDEL 失败被当成功（fd 泄漏、坏固件文件残留未删）。
+   *
+   * 反过来写：hw_uart3_flush_rx() 自带临界区；它跑完后 ISR 即便入队，
+   * 也会被紧随其后的队列清零抹掉。 */
+  hw_uart3_flush_rx();
+
   __disable_irq();
   s_queue_head = 0U;
   s_queue_tail = 0U;
@@ -282,7 +321,6 @@ void at_flush_rx(void)
   s_raw_buf = NULL;
   s_raw_buf_size = 0U;
   __enable_irq();
-  hw_uart3_flush_rx();
 }
 
 int32_t at_get_last_line(char *buf, uint16_t buf_size)

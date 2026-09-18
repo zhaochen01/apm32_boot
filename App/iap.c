@@ -41,15 +41,36 @@ static void iap_state_flush(void)
   hw_flash_erase(upgrade_cfg.config_addr, FLASH_PAGE_SIZE);
   hw_flash_write(upgrade_cfg.config_addr, &upgrade, sizeof(upgrade));
   __enable_irq();
+
+  /* 回读校验 —— 这里失败【绝不能再复位】。
+   *
+   * 元数据没真正写进去，持久状态就没改变，而调用方紧接着 NVIC_SystemReset()：
+   * 引导区会读到旧的 flag（比如还是 0x3A）再把我们跳回来，每轮重来一次完整
+   * 下载 -> 无限重装环。违反 iap.c 顶部不变量 1（"复位只允许发生在持久状态
+   * 已改变之后"）。
+   *
+   * 用回读而不是查 FMC_ErasePage/FMC_ProgramWord 的返回码：回读是唯一能同时
+   * 覆盖"擦除失败"和"写入失败"的判据，也不依赖 SDK 状态位是否正确。 */
+  if(memcmp((const void *)upgrade_cfg.config_addr, &upgrade, sizeof(upgrade)) != 0)
+  {
+    printf("[iap] metadata verify FAILED -> park (no reset)\r\n");
+    for(;;)
+    {
+      WDT_FEED();
+      Delay_ms(500);
+    }
+  }
 }
 
 /*
  * 槽可用性判定 —— 与引导区 boot_app_valid() 逐条同构，改一处必须同时改两处。
+ * 两边一旦分歧，IAP_ACT_RESUME_APP 的复位就会变成无限复位环。
  *
- *   ① 向量表合理性：MSP 落 RAM、复位向量落本槽内、Thumb 位为 1
- *   ② 无有效记录（FW_VALID 为假）-> 视为裸烧，放行
- *      引导区同口径：crc==0xFFFFFFFF || size==0 || size>槽容量
- *   ③ 有记录 -> 按记录长度做全量 CRC32
+ *   ① 向量表合理性：MSP 落 RAM、复位向量落本槽内、Thumb 位为 1   [iap_vector_ok]
+ *   ② 无记录（crc == 0xFFFFFFFF）-> 产线 J-Link 裸烧，放行      [slot_usable]
+ *   ③ 记录损坏（size 为 0 / 0xFFFFFFFF / 越界）-> 判无效        [slot_usable]
+ *      不属于"无记录"，放行等于跳过校验
+ *   ④ 有记录 -> 按记录长度做全量 CRC32                          [slot_usable]
  */
 int32_t iap_vector_ok(uint32_t addr, uint32_t end)
 {
@@ -66,7 +87,16 @@ static int32_t slot_usable(uint32_t addr, const Firmware *fw)
 {
   if(!iap_vector_ok(addr, addr + APP_MAX_SIZE)) return 0;
 
-  if(!FW_VALID(fw)) return 1;   /* 无记录 -> 视为裸烧，放行 */
+  /* 无记录 -> 产线 J-Link 直烧后的首次启动：放行，不校验。
+   * 判据只能是 crc == 0xFFFFFFFF（Upgrade_t 被擦除后唯一的形态）。
+   *
+   * 【不能用 !FW_VALID(fw) 代替】：那个宏把 size 异常（0 / 0xFFFFFFFF /
+   * 越界）也算作"无记录"，可 size 异常配着有效 crc 是【记录损坏】——
+   * 放行等于跳过校验跳进一段没验过的代码，坏了就是 HardFault -> NRST ->
+   * 同样放行 -> 无限复位环。这类记录必须判无效，交给回退 / UFS 重装。
+   * 与引导区 boot_app_valid() 逐条同构，改这里必须同时改那边。 */
+  if(fw->crc == 0xFFFFFFFFu) return 1;
+  if(fw->size == 0u || fw->size > APP_MAX_SIZE) return 0;
 
   /* 214KB 逐位 CRC 约 100~150ms，期间必须喂外部看门狗 */
   WDT_FEED();

@@ -47,7 +47,11 @@ static int32_t flash_erase_with_wdt(uint32_t addr, uint32_t size)
   while(offset < erase_len)
   {
     WDT_FEED();
-    FMC_ErasePage(addr + offset);
+    if(FMC_ErasePage(addr + offset) != FMC_STATUS_COMPLETE)
+    {
+      FMC_Lock();
+      return -1;                 /* 如实报错，不再吞掉 */
+    }
     offset += FLASH_PAGE_SIZE;
   }
   FMC_Lock();
@@ -68,7 +72,10 @@ static int32_t flash_write_with_wdt(uint32_t addr, const uint8_t *data, uint32_t
       chunk = FLASH_PAGE_SIZE;
     }
     WDT_FEED();
-    (void)hw_flash_write(addr + offset, data + offset, chunk);
+    if(hw_flash_write(addr + offset, data + offset, chunk) != 0)
+    {
+      return -1;                 /* 如实报错，不再吞掉 */
+    }
     offset += chunk;
   }
   WDT_FEED();
@@ -91,14 +98,20 @@ static void upgrade_recover_wait_with_wdt(uint32_t wait_ms)
   WDT_FEED();
 }
 
-/* abort the upgrade and boot the current run-region firmware;
- * clears any pending trial request so the old firmware is not rolled back.
- * flag is saved as 0xFF (first-boot semantics) instead of 0x5A: the run
- * region may hold firmware whose fw[0] metadata was never recorded
- * (e.g. flashed directly by J-Link). Saving 0x5A there would lock the
- * boot loader in an endless reset loop - fw[0] invalid -> cannot jump,
- * fw[1] invalid -> cannot rollback. Abort happens before the run region
- * is erased, so the current firmware is still intact and 0xFF jumps to it. */
+/* 放弃本次升级。运行区未被触碰，写标志后复位交回引导区。
+ *
+ * flag 写 0xFF 而不是 0x5A：
+ *   · 三层架构下引导区只认 0x3A(APP 升级) / 0x3B(boot 自升级) 两个请求码，
+ *     abort 走正常启动分支跳 APP —— 0xFF 与 0x5A 对引导区等价。
+ *   · 差别在 APP 侧：hw_board_init() 会把 flag==0xFF 规范化为 0x5A。
+ *     abort 时运行区可能是一份从未记录过 fw[0] 的固件（产线 J-Link 直烧），
+ *     让 APP 走一遍规范化更稳。
+ *
+ * 【旧注释已废弃，勿再按它推断】原文写的是"flag=0xFF jumps to it"、
+ * "fw[1] invalid -> cannot rollback" —— 那是**旧架构**（升级 boot 自己
+ * 跳 APP）的说法。新架构下 iap.c 里已经没有跳 APP 的实现，本函数只写标志
+ * 不复位、也不跳转，决策全在引导区。 */
+
 static void upgrade_abort(void)
 {
   printf("upgrade abort, boot current firmware\r\n");
@@ -265,7 +278,12 @@ static void upgrade_self_run(void)
 
     if(chunk > LTE_READ_CHUNK_SIZE) chunk = LTE_READ_CHUNK_SIZE;
 
-    if(at_file_read(&fc, up_file_buf + off, LTE_READ_CHUNK_SIZE,
+    /* 上界必须是【剩余空间】而不是整块缓冲的容量：at_file_read() 内部按
+     * 这个 buf_size 限 ISR 的写入范围（at_arm_raw_rx），而数据是写在
+     * up_file_buf + off 处的。传全容量等于告诉接收方有 40960 字节可用，
+     * 实际只有 40960 - off。模组若超发就越界 —— QFREAD 失败后模组仍会
+     * 继续吐数据（upgrade_recover_wait_with_wdt 就是为这个而设）。 */
+    if(at_file_read(&fc, up_file_buf + off, LTE_READ_CHUNK_SIZE - off,
                     chunk, &actual, UPGRADE_QFREAD_TIMEOUT_MS) != AT_FILE_ERR_OK) {
       printf("[boot-self] QFREAD fail at offset %lu\r\n", (unsigned long)off);
       (void)at_file_close(&fc);
@@ -538,7 +556,7 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
       iap_upgrade_state_save(0xAA, UPGRADE_STATUS_FAILED);
     }
   }
-  else
+  else if(ctx->action == UPGRADE_ACTION_ROLLBACK)
   {
     /* ================= 0xAA rollback: backup -> run ================= */
     if(!FW_VALID(&upgrade.fw[1]) ||
@@ -576,6 +594,14 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
     /* 拷贝重试耗尽：B 好但写不进 A —— Flash 硬故障，复位多少次结果都一样，
      * 保留 0xAA 让下次启动重试只会形成无限复位环。park。 */
     printf("rollback write retries exhausted\r\n");
+    upgrade_park();
+  }
+  else
+  {
+    /* 未知 action。iap_init() 只产生 NETWORK / SELF / ROLLBACK 三种，而 SELF
+     * 在 upgrade_self_run() 里永不返回 —— 走到这里说明枚举被扩充过而这里
+     * 没跟上。不猜该做什么，park 等现场。 */
+    printf("unknown action 0x%X -> park\r\n", (int)ctx->action);
     upgrade_park();
   }
 }
