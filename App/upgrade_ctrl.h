@@ -39,7 +39,8 @@
  * DATA17 = boot 试用计数）。曾经选 DATA16，撞上了 APP 的 CRASH_REG_R1_H：
  * 每次 HardFault 写 r1>>16，约 1/65536 概率等于 0x5A5A，凭空造出一个串口
  * 请求并且没人清。加寄存器前先全工程 grep 一遍 BAKPR_DATA。
- * 三处必须一致：本处 / apm32_e103_bootstrap/App/boot.h / IoT-4G-v2/App/app_ota.c */
+ * 三处必须一致：本处 / apm32_e103_bootstrap/App/boot.h / 各 APP 侧的 app_ota.c
+ * （IoT-4G-v2、Collector-4G 两个产品共用这一套 boot，宏值必须同值） */
 #define BOOT_SERIAL_REQ_REG    BAKPR_DATA18
 #define BOOT_SERIAL_REQ_MAGIC  0x5A5Au
 

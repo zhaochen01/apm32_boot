@@ -253,7 +253,7 @@ static int32_t upgrade_preserve_backup(const UPGRADE_CTX_T *ctx)
  * 掉电安全：
  *   ②之前掉电 -> A 完好，下次重来
  *   ③之后掉电 -> A 可能半写 -> 引导区判 A 无效 -> 若 APP 有效则跳 APP，
- *                由 APP 从 B 把旧 boot 拷回（见 IoT-4G-v2 的 boot 修复逻辑）
+ *                由 APP 从 B 把旧 boot 拷回（见各 APP 侧的 boot 修复逻辑）
  */
 static int32_t boot_image_ok(const uint8_t *img, uint32_t size)
 {

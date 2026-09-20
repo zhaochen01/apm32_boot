@@ -9,8 +9,18 @@ APM32E103 Boot Loader：通过 Quectel CAT-1 4G 模块进行远程固件升级�
 - **MCU**：APM32E103RE（ARM Cortex-M3，72MHz，512KB Flash / 128KB SRAM）
 - **4G 模块**：Quectel CAT-1 系列（EC800/EG800K），AT 指令集
 - **编译器**：ARMCC（Keil MDK v5）；GCC 亦可通过 `#ifdef` 块支持
-- **版本**：v2.2.0.102（**权威值在 `Include/main.h` 的 `VERSION`** —— 这份文档里的数字只是快照，改版本号时以文件为准）
+- **版本**：**v2.3.0.105**（**权威值在 `Include/main.h` 的 `VERSION`** —— 这份文档里的数字只是快照，改版本号时以文件为准）
 - **字符编码**：C 源码统一 **UTF-8**（2026-09-18 由混合状态全量转换而来，与 IoT-4G-v2、引导区一致）
+
+## 版本记录
+
+| 日期 | 版本 | 变更 |
+|------|------|------|
+| 2026-09-20 | **v2.3.0.105** | `VERSION` `2.2.0.104` → `2.3.0.105`。本批**唯一实质改动就是这个版本号**，其余（`App/iap.h` / `App/upgrade_ctrl.c` / `App/upgrade_ctrl.h`）均为**注释** —— 说明本套升级 boot 与引导区 Stage-1 同时服务 **IoT-4G-v2** 与 **Collector-4G** 两个产品，不是只有 IoT。<br>已通过 `set_upgrade` boot 自升级在 Collector-4G 真机验证：下载 → CRC 自检 → A 槽整槽存档到 B → RAM 例程擦写 A 槽 → 引导区 CRC/向量检查通过 → 新 boot 打印 `Boot Loader... 2.3.0.105` |
+
+> **权威值在 `Include/main.h` 的 `VERSION`** —— 本表只是快照，改版本号时以文件为准。
+> ⚠️ 两个产品**共用这一份 boot**：改这里等于同时改 IoT-4G-v2 与 Collector-4G 的升级行为，
+> 且 `Upgrade_t` 的尺寸/布局在三处各有一份定义（本工程 `App/iap.h`、引导区 `App/boot.h`、两个 APP 侧），**任何改动必须三个工程同一提交内同步**。
 
 ## 构建
 

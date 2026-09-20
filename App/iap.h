@@ -24,8 +24,11 @@
  * 写者：升级 boot。读者：APP（下次启动读走 -> 上报云端 -> 清 0）。
  *
  * 注意：APP 判定升级结果只能看 status，不能看 flag ——
- *   IoT-4G-v2/Hw/hw_board.c 的 hw_board_init() 一旦发现 flag==0xFF 就整页
- *   擦写改成 0x5A，于是 abort 与安装成功在 flag 上完全不可区分。 */
+ *   APP 侧板级初始化（IoT-4G-v2 的 hw_board_init / Collector-4G 的同级逻辑）
+ *   一旦发现 flag==0xFF 就整页擦写改成 0x5A，于是 abort 与安装成功在 flag 上
+ *   完全不可区分。
+ *
+ * 适用产品：IoT-4G-v2、Collector-4G。 */
 #define UPGRADE_STATUS_NONE   0x00   /* 无结果：初始态 / 已被 APP 消费 */
 #define UPGRADE_STATUS_OK     0x02   /* 安装成功  -> 上行 state=3 */
 #define UPGRADE_STATUS_FAILED 0x03   /* 安装失败  -> 上行 state=4 */

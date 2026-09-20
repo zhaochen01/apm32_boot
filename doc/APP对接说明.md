@@ -1,6 +1,6 @@
 # APP 与 Boot Loader 对接说明
 
-> 适用 Boot Loader 版本：**v2.1.0.100**（`VERSION`，见 `Include/main.h`）
+> 适用 Boot Loader 版本：**v2.3.0.105**（`VERSION`，见 `Include/main.h`）
 > 本文档描述 APP（运行在 APP_ADDR 的应用程序）与 Boot Loader 之间的接口契约。
 > 所有地址、结构体定义均来自当前 boot 工程源码（`App/iap.h`、`App/iap.c`、`App/upgrade_ctrl.h`），APP 侧必须与之完全一致。
 
@@ -108,7 +108,7 @@ Boot：读 0xAA → 校验 fw[1] 的 size/crc 有效 + 保底区 CRC 预检
 时间    动作
 t0      APP 完成文件下载（文件已放入模块 UFS）并写元数据
 t1      APP: NVIC_SystemReset()
-t2      Boot: 打印 "Boot Loader... 2.1.0.100" + 元数据摘要
+t2      Boot: 打印 "Boot Loader... 2.3.0.105" + 元数据摘要
 t3      Boot: 保底复制（运行区 → 保底区，224KB 约 3~6 秒，回读校验）
 t4      Boot: 模块上下电（约 0.5s）→ 等 RDY（约 1~5s）
 t5      Boot: QFOPEN → QFLST → 分块下载（最大 224KB ≈ 6 块，每块约 3.6s）
@@ -230,7 +230,7 @@ void app_request_upgrade(uint32_t file_size, uint32_t file_crc)
 ## 6. 调试串口
 
 - **USART1，115200，8N1**（Boot 全部诊断输出）
-- Boot 启动打印：`Boot Loader... 2.1.0.100`
+- Boot 启动打印：`Boot Loader... 2.3.0.105`
 - 升级过程关键打印（供联调对照）：
   - `upgrade.flag=0x3A, fw_flag=1, status=0x1, up_count=3` —— 启动时元数据摘要
   - `preserve: copy run -> backup` / `backup already current, skip preserve` —— 保底步骤
@@ -251,4 +251,4 @@ void app_request_upgrade(uint32_t file_size, uint32_t file_crc)
 5. **写元数据的时机**：只能在"准备好文件且确认 size/crc"之后写 0x3A 并复位；中途复位（如看门狗）会导致 Boot 重复执行升级——这是设计行为（保底区只会在新固件下载前被更新，重复升级无害）
 6. **APP 固件最大 224KB**：超出会写入失败（Flash 越界写入 FMC 错误 → CRC 不符 → 重试耗尽）
 7. **trial 回退必须主动确认**：启用 trial（写 `status=0x01` 请求升级）后，新固件若在 3 次启动内未写 `status=0x02`，会被回退到上一个版本。确认代码不要放在可能被跳过的路径上
-8. **版本配套**：本文档针对 Boot v2.1.0.100；若 Boot 版本变化，以对应版本源码中的 `iap.h`/`upgrade_ctrl.h` 为准
+8. **版本配套**：本文档针对 Boot **v2.3.0.105**（`VERSION`，见 `Include/main.h`，改版本号时以文件为准）；若 Boot 版本变化，以对应版本源码中的 `iap.h`/`upgrade_ctrl.h` 为准
