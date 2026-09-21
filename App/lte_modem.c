@@ -39,6 +39,10 @@ const LTE_MODEM_CFG_T LTE_MODEM_CFG_EG800K =
 /* 分段延时并喂狗：长延时期间若不给外部 WDT 喂食会被 NRST 复位。
  * 2026-09-16 新增——原 Delay_ms(hold_ms)/Delay_ms(1500) 期间完全不喂，
  * 1500ms 已逼近典型 WDT 超时窗口。 */
+/* AT 通道探测前的稳定等待：boot 刚接手时模组还在跑，AT 通道基本是活的，
+ * 留一点余量避免误判成"模组没起"而多走一次 power cycle。 */
+#define LTE_MODEM_AT_PROBE_DELAY_MS   500U
+
 static void delay_feed(uint32_t ms)
 {
   while(ms > 0U)
@@ -102,6 +106,23 @@ int32_t lte_modem_init(const LTE_MODEM_CFG_T *cfg)
   hw_gpio_init(s_modem_rst_cfg);
   s_modem_rst_cfg.port->BSC = s_modem_rst_cfg.pin;
 
+  /* ---- 快速路径：模组可能已经在上电运行，先探 AT 通道，【不动电源】----
+   * 升级场景下模组必然是【热的】—— APP 刚用它把固件下载进 UFS 才复位的，
+   * boot 接手时它还在跑。而 RDY 只在模组【启动时】发一次，热模组不会再发，
+   * 所以原来"先 power cycle 再等 RDY"在这里既多此一举又危险：
+   * 本工程三个产品共用同一份 boot，但 PB1 的有效极性并不相同
+   * （NEMA 低=上电，IoT-4G-v2 / Collector-4G 高=上电），那个 power cycle
+   * 对其中一个必然是【反的】—— 会把好端端的模组断电，然后重试全部等不到 RDY，
+   * 表现为升级整个失败（2026-09-21 NEMA 云端 OTA 实测就是这个症状）。
+   * 所以先直接探 AT：通了就说明模组活着，什么都别动。 */
+  delay_feed(LTE_MODEM_AT_PROBE_DELAY_MS);
+  if(modem_at_channel_check() == LTE_MODEM_ERR_OK)
+  {
+    printf("modem already up (AT ok), skip power cycle\r\n");
+    return LTE_MODEM_ERR_OK;
+  }
+
+  /* ---- 冷启动兜底：模组真的没起来，才走 power cycle + 等 RDY ---- */
   for(attempt = 0U; attempt <= cfg->rdy_retry_count; attempt++)
   {
     modem_power_cycle(cfg->power_cycle_hold_ms);
