@@ -23,4 +23,10 @@ extern void USART3_RX_DMA_Init(void);
 extern int32_t uart_send_data(USART_T *usart, void *pdata, uint32_t len);
 extern uint32_t dma_send_data(USART_T *usart, void *pdata, uint32_t len);
 
+/* 运行时改波特率（串口下载提速用；只在 USART1 的下载会话内调用）。
+ * 返回 0 成功、-1 失败（TX 未归位，见实现里的 TC 等待）。
+ * 帧格式固定 8N1 —— 与 uart_cfg_list 里两个口的配置一致（不读回原值，
+ * 免得为省几十字节代码引入"读到的格式和实际不一致"的隐患）。 */
+extern int32_t user_uart_set_baud(USART_T *usart, uint32_t baud);
+
 #endif // _NETWORK_EG800K_H

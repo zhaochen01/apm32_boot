@@ -239,11 +239,12 @@ int main(void)
       {
         uint32_t dl_sz = 0U;
         uint32_t dl_crc = 0U;
+        uint32_t dl_baud = 0U;
 
         printf("[upgrade-boot] serial download window (%lu ms)...\r\n",
                (unsigned long)SERIAL_DL_BOOT_WAIT_MS);
 
-        if(serial_dl_wait_request(SERIAL_DL_BOOT_WAIT_MS, &dl_sz, &dl_crc))
+        if(serial_dl_wait_request(SERIAL_DL_BOOT_WAIT_MS, &dl_sz, &dl_crc, &dl_baud))
         {
           UPGRADE_CTX_T sctx;
 
@@ -253,6 +254,7 @@ int main(void)
           sctx.backup_addr = upgrade_cfg.fw1_addr;
           sctx.expect_size = dl_sz;
           sctx.expect_crc  = dl_crc;
+          sctx.serial_baud = dl_baud;   /* 请求行里协商的波特率（缺省 115200） */
 
           printf("[upgrade-boot] serial request caught\r\n");
           upgrade_run(&sctx);       /* 内部完成安装并复位，永不返回 */

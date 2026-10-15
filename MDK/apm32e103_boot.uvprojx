@@ -302,7 +302,7 @@
               <OCR_RVCT9>
                 <Type>0</Type>
                 <StartAddress>0x20000000</StartAddress>
-                <Size>0x1f000</Size>
+                <Size>0x1f800</Size>
               </OCR_RVCT9>
               <OCR_RVCT10>
                 <Type>0</Type>
@@ -337,7 +337,7 @@
             <v6WtE>0</v6WtE>
             <v6Rtti>0</v6Rtti>
             <VariousControls>
-              <MiscControls></MiscControls>
+              <MiscControls>-Oz</MiscControls>
               <Define>APM32E103_MINI</Define>
               <Undefine></Undefine>
               <IncludePath>..\Include;..\Lib\APM32E10x_StdPeriphDriver\inc;..\Lib\CMSIS\Include;..\Lib\Device\Geehy\APM32E10x\Include;..\App;..\Hw</IncludePath>

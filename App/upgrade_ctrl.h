@@ -60,6 +60,8 @@ typedef struct
   uint32_t         backup_addr;    /* backup region base (UP_BACKUP_ADDR) */
   uint32_t         expect_size;    /* expected firmware size */
   uint32_t         expect_crc;     /* expected CRC32 */
+  uint32_t         serial_baud;    /* 串口下载：请求行里协商的波特率；
+                                    * 0 或 115200 = 不切（缺省行为） */
 } UPGRADE_CTX_T;
 
 extern uint32_t CRC32(uint8_t *data, uint32_t length);

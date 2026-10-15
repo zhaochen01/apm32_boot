@@ -1,6 +1,20 @@
 # APP 与 Boot Loader 对接说明
 
-> 适用 Boot Loader 版本：**v2.3.0.105**（`VERSION`，见 `Include/main.h`）
+> ⚠️ **本文档已过时，勿按它对接（2026-10-14 标注）。**
+>
+> 它描述的是**旧的两层布局**：运行区 `0x08006000`（224KB）、保底区 `0x0803E000`、
+> 结构体里的 `fw[3]`、以及**早已取消的 trial 回退契约**（`status=0x01` / `up_count`）。
+>
+> 现行是**三层架构**（引导区 Stage-1 + 升级 boot 24KB A 槽 + APP 214KB A/B 槽），
+> 地址与字段语义一律以源码为准：
+>   · `App/iap.h` —— `APP_ADDR`(0x0800F000) / `UP_BACKUP_ADDR`(0x08044800) /
+>     `APP_MAX_SIZE`(0x35800=214KB) / `UPGRADE_STATUS_NONE|OK|FAILED`
+>   · `App/iap.c` —— 启动决策、两槽判据（与引导区必须同构）
+>   · `App/upgrade_ctrl.h` —— 升级状态机、动作码
+> 整体重写本文档是待办事项（见 `CLAUDE.md` 的版本记录）。
+
+> 适用 Boot Loader 版本：**v2.4.0.106**（`VERSION`，见 `Include/main.h`）。
+> ⚠️ 但如上所述，本文的布局与契约部分与现行版本**对不上**，仅作历史参考。
 > 本文档描述 APP（运行在 APP_ADDR 的应用程序）与 Boot Loader 之间的接口契约。
 > 所有地址、结构体定义均来自当前 boot 工程源码（`App/iap.h`、`App/iap.c`、`App/upgrade_ctrl.h`），APP 侧必须与之完全一致。
 
@@ -251,4 +265,4 @@ void app_request_upgrade(uint32_t file_size, uint32_t file_crc)
 5. **写元数据的时机**：只能在"准备好文件且确认 size/crc"之后写 0x3A 并复位；中途复位（如看门狗）会导致 Boot 重复执行升级——这是设计行为（保底区只会在新固件下载前被更新，重复升级无害）
 6. **APP 固件最大 224KB**：超出会写入失败（Flash 越界写入 FMC 错误 → CRC 不符 → 重试耗尽）
 7. **trial 回退必须主动确认**：启用 trial（写 `status=0x01` 请求升级）后，新固件若在 3 次启动内未写 `status=0x02`，会被回退到上一个版本。确认代码不要放在可能被跳过的路径上
-8. **版本配套**：本文档针对 Boot **v2.3.0.105**（`VERSION`，见 `Include/main.h`，改版本号时以文件为准）；若 Boot 版本变化，以对应版本源码中的 `iap.h`/`upgrade_ctrl.h` 为准
+8. **版本配套**：本文档针对 Boot **v2.4.0.106**（`VERSION`，见 `Include/main.h`，改版本号时以文件为准）；若 Boot 版本变化，以对应版本源码中的 `iap.h`/`upgrade_ctrl.h` 为准

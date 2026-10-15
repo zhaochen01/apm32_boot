@@ -107,7 +107,7 @@ int32_t uart_send_data(USART_T *usart, void *pdata, uint32_t len)
 	{
 		/* send a byte of data to the serial port */
 		USART_TxData(usart, *(uint8_t *)pdata++ );
-	
+
 		/* wait for the data to be send  */
 		guard = UART_TXBE_WAIT_MAX;
 		while((USART_ReadStatusFlag(usart, USART_FLAG_TXBE) == RESET) && (guard != 0u))
@@ -121,6 +121,48 @@ int32_t uart_send_data(USART_T *usart, void *pdata, uint32_t len)
 	}
 
   return 0;
+}
+
+
+/*!
+ * @brief       运行时改波特率（串口下载提速；只在 USART1 下载会话内调用）
+ *
+ * 【必须先等 TC，不能只等 TXBE】TXBE=1 只表示发送数据寄存器空，最后几个
+ * 字节还在移位寄存器里 —— 这时改 BR 会把在途字节的位宽切坏。设备切波特率
+ * 前刚发完的就是控制字 "#RDY\r\n"，它一乱整个按页 ACK 协议立刻错位。
+ * TC=1 才代表最后一个 bit 已经出线。
+ *
+ * 复用 SDK 的 USART_Config：它对 CTRL1/2/3 都是掩码改写（0xE9F3/0xCFFF/
+ * 0xFCFF），UE/TE/RE 与中断配置都不受影响，运行中重配是安全的。
+ * 帧格式固定 8N1（与 uart_cfg_list 一致）。 */
+int32_t user_uart_set_baud(USART_T *usart, uint32_t baud)
+{
+	USART_Config_T cfg;
+	uint32_t guard = UART_TXBE_WAIT_MAX;
+
+	if((usart == NULL) || (baud == 0u))
+	{
+		return -1;
+	}
+
+	while((USART_ReadStatusFlag(usart, USART_FLAG_TXC) == RESET) && (guard != 0u))
+	{
+		guard--;
+	}
+	if(guard == 0u)
+	{
+		return -1;
+	}
+
+	cfg.baudRate	    = baud;
+	cfg.hardwareFlow  = USART_HARDWARE_FLOW_NONE;
+	cfg.mode		      = USART_MODE_TX_RX;
+	cfg.wordLength	  = USART_WORD_LEN_8B;
+	cfg.parity		    = USART_PARITY_NONE;
+	cfg.stopBits	    = USART_STOP_BIT_1;
+	USART_Config(usart, &cfg);
+
+	return 0;
 }
 
 

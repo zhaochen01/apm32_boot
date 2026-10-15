@@ -31,18 +31,62 @@ void serial_dl_flush(void)
 {
   uint32_t guard = 0u;
 
-  while((USART_ReadStatusFlag(DL_USART, USART_FLAG_RXBNE) != RESET) &&
-        (guard < DL_FLUSH_MAX))
+  /* 走 serial_dl_getc() 而不是"自己判 RXBNE + 读 DATA"：getc 会在 RXBNE 没置位
+   * 但 OVRE/FE/NE 置位时补一次 DATA 读，把标志清掉（见那里的长注释）。原实现
+   * 直接读 DATA，遇到"OVRE 已锁存、RXBNE 不再置位"时一次都清不掉 —— flush 变成
+   * 空操作，紧接着的收页从第一字节起就是聋的。 */
+  while((guard < DL_FLUSH_MAX) && (serial_dl_getc() >= 0))
   {
-    (void)USART_RxData(DL_USART);
     guard++;
   }
 }
 
+/* USART1 接收错误计数（诊断用）。为什么要它：切到 460800/921600 后若刷机失败，
+ * "设备丢了几个字节"与"PC 根本没发"在日志上长得一模一样（都表现为 rx timeout），
+ * 而这两者的修法完全不同（前者要改接收路径，后者要查上位机/线材）。
+ * ORE=硬件接收寄存器被覆盖（真丢字节）、FE=帧错、NE=噪声。
+ *
+ * 只在 getc 里【按位累加】，不改变状态：先读一次 STS（ORE/FE/NE/RXBNE 都在里面），
+ * 再按需读 DATA —— 读 STS+DR 正是清 ORE 的规定序列。 */
+static uint32_t s_rx_last_got = 0u;   /* 最近一次 recv 超时时已收到的字节数 */
+
 int32_t serial_dl_getc(void)
 {
-  if(USART_ReadStatusFlag(DL_USART, USART_FLAG_RXBNE) == RESET) return -1;
-  return (int32_t)(uint8_t)USART_RxData(DL_USART);
+  uint32_t sts = DL_USART->STS;
+
+  if((sts & (uint32_t)USART_FLAG_RXBNE) != 0u)
+  {
+    return (int32_t)(uint8_t)USART_RxData(DL_USART);
+  }
+
+  /* ============ 本工程最贵的一课（2026-10-14 实测）============
+   * RXBNE 没置位 ≠ "什么都没发生"：OVRE/FE/NE 只要置位，就必须【无条件再读
+   * 一次 DATA】才算走完"读 STS + 读 DATA"这个规定清除序列。
+   *
+   * 原实现只在 RXBNE 置位时才读 DATA —— 于是只要出现一次"OVRE 置位且 RXBNE
+   * 不置位"的时刻，OVRE 就永远没人清，接收端【永久失聪】，而轮询循环还在
+   * 一圈圈地把同一个标志记成新的溢出。
+   *
+   * 实测症状（460800 串口刷机，第 2 页）：
+   *   [serial] rx timeout at off=2048 got=0/2048 ore=2569752 fe=0 ne=0
+   * 注意 fe=0 ne=0 —— 波特率是对的、线路是干净的；字节确实在进（否则 OVRE
+   * 不可能置位），但一个也读不出来。上位机那边把那 2048 字节完整发了出去。
+   * 修掉它之后，一次偶发溢出最多只丢 1 个字节（由整包 CRC 兜住），而不是
+   * 整轮下载报废。
+   *
+   * 读的是 32 位 DATA 而不是 USART_RxData()：后者经 DATA_B 位域（9 位），
+   * 编译器可能发窄读；清除序列要求的是"读 DR 这个寄存器地址"。返回值是垃圾
+   * （可能是残留字节），必须丢掉 —— 要的只是清标志这个副作用。 */
+  if((sts & (uint32_t)(USART_FLAG_OVRE | USART_FLAG_FE | USART_FLAG_NE)) != 0u)
+  {
+    (void)DL_USART->DATA;
+  }
+  return -1;
+}
+
+void serial_dl_get_rx_diag(uint32_t *got)
+{
+  if(got != NULL) *got = s_rx_last_got;
 }
 
 int32_t serial_dl_send(const char *s)
@@ -73,34 +117,90 @@ static void serial_dl_feed_soft(uint32_t *last)
   }
 }
 
+/* ==================== 收页改走 DMA（2026-10-14）====================
+ * 为什么必须上 DMA：460800 下用轮询收字节实测会【偶发丢字节】—— 一次 166KB
+ * 传输丢 1~2 个，整包 CRC 因此不过、整轮下载在最后一页报废（实测记录：
+ * 82 页全收完，最后校验失败）。丢的机制是"轮询循环被饿到超过 1 字节时间
+ * （460800 下 21.7µs）就触发一次 OVRE"（见 getc 的长注释）。
+ * DMA 让字节由硬件从 DATA 搬进 RAM，CPU 完全不参与搬运，从根上消掉这一类。
+ *
+ * 【协议不变】：收的还是同样多字节，只是搬运工换了人 —— 上位机与旧工具
+ * 都不受影响。握手阶段（等请求行）仍走轮询 getc：那一次只有几十字节，
+ * 而且状态机本来就要求逐字节看内容。 */
+#define DL_DMA_CH       DMA1_Channel5   /* USART1_RX 固定映射 DMA1 通道 5（F1 系映射） */
+#define DL_DMA_FLAGS    ((uint32_t)(DMA1_FLAG_GINT5 | DMA1_FLAG_TC5 | \
+                                    DMA1_FLAG_HT5 | DMA1_FLAG_TERR5))
+
+static uint8_t      s_dma_ready = 0u;
+static DMA_Config_T s_dma_cfg;
+
+static void serial_dl_dma_setup(void)
+{
+  RCM_EnableAHBPeriphClock(RCM_AHB_PERIPH_DMA1);
+  DMA_Reset(DL_DMA_CH);
+
+  DMA_ConfigStructInit(&s_dma_cfg);
+  s_dma_cfg.peripheralBaseAddr = (uint32_t)(&DL_USART->DATA);
+  s_dma_cfg.dir                = DMA_DIR_PERIPHERAL_SRC;
+  s_dma_cfg.peripheralInc      = DMA_PERIPHERAL_INC_DISABLE;
+  s_dma_cfg.memoryInc          = DMA_MEMORY_INC_ENABLE;
+  s_dma_cfg.peripheralDataSize = DMA_PERIPHERAL_DATA_SIZE_BYTE;
+  s_dma_cfg.memoryDataSize     = DMA_MEMORY_DATA_SIZE_BYTE;
+  s_dma_cfg.loopMode           = DMA_MODE_NORMAL;     /* 一页一次，不用环形 */
+  s_dma_cfg.priority           = DMA_PRIORITY_VERYHIGH;   /* 收页期间没有别的 DMA 用户 */
+  s_dma_cfg.M2M                = DMA_M2MEN_DISABLE;
+  /* memoryBaseAddr / bufferSize 每页重设 */
+
+  DMA_ClearStatusFlag(DL_DMA_FLAGS);
+  USART_EnableDMA(DL_USART, USART_DMA_RX);
+  s_dma_ready = 1u;
+}
+
+/* 收满 len 字节返回 len；超时返回 -1（已收字节数进诊断）。语义与旧的轮询版
+ * 完全一致，只是搬运由 DMA 做 —— 上层（收页循环）一行都不用改。 */
 int32_t serial_dl_recv(uint8_t *buf, uint32_t len, uint32_t timeout_ms)
 {
-  uint32_t got  = 0u;
   uint32_t start;
   uint32_t last_feed;
-  int32_t  c;
 
   if((buf == NULL) || (len == 0u)) return -1;
+  if(s_dma_ready == 0u)
+  {
+    serial_dl_dma_setup();
+  }
+
+  /* 先排空：滞留在 DATA 里的残字节会被 DMA 当成【页首】搬进来 → 整页错位
+   * （那正是原来"收满 2048 但内容不对"的形态）。顺带把 OVRE/FE/NE 清掉
+   * —— 见 getc 里为什么必须无条件清。 */
+  serial_dl_flush();
+
+  s_dma_cfg.memoryBaseAddr = (uint32_t)buf;
+  s_dma_cfg.bufferSize     = len;
+  DMA_Config(DL_DMA_CH, &s_dma_cfg);      /* DMA_Config 只写配置寄存器，不使能通道 */
+  DMA_ClearStatusFlag(DL_DMA_FLAGS);
+  DMA_Enable(DL_DMA_CH);
 
   start     = Delay_GetTick();
   last_feed = start;
 
-  while(got < len)
+  while(DMA_ReadStatusFlag(DMA1_FLAG_TC5) == RESET)
   {
-    c = serial_dl_getc();
-
-    if(c >= 0)
+    if((DMA_ReadStatusFlag(DMA1_FLAG_TERR5) != RESET) ||
+       ((uint32_t)(Delay_GetTick() - start) >= timeout_ms))
     {
-      buf[got] = (uint8_t)c;
-      got++;
-      continue;
+      /* 超时/传输出错：把【已搬进来的字节数】记进诊断 —— 它区分
+       * "对端没发"（接近 0）与"中途断流"（接近满）。 */
+      s_rx_last_got = len - (uint32_t)DMA_ReadDataNumber(DL_DMA_CH);
+      DMA_Disable(DL_DMA_CH);
+      DMA_ClearStatusFlag(DL_DMA_FLAGS);
+      return -1;
     }
-
-    if((uint32_t)(Delay_GetTick() - start) >= timeout_ms) return -1;
     serial_dl_feed_soft(&last_feed);
   }
 
-  return (int32_t)got;
+  DMA_Disable(DL_DMA_CH);
+  DMA_ClearStatusFlag(DL_DMA_FLAGS);
+  return (int32_t)len;
 }
 
 static int32_t serial_dl_hexval(uint8_t ch)
@@ -111,22 +211,45 @@ static int32_t serial_dl_hexval(uint8_t ch)
   return -1;
 }
 
+/* 波特率白名单：只有这四个值会被接受，其余一律回落 115200。
+ * 宁可慢，不可把链路切到双方对不上的速率上 —— 那时"请求行已确认"
+ * 就成了一句空话，而现场只会看到刷机失败。
+ * 与 tools/serial_dl.py 的 BAUD_WHITELIST 必须一致。 */
+static uint32_t serial_dl_check_baud(uint32_t b)
+{
+  if((b == 115200u) || (b == 230400u) || (b == 460800u) || (b == 921600u))
+  {
+    return b;
+  }
+  return SERIAL_DL_BAUD_DEFAULT;
+}
+
+int32_t serial_dl_set_baud(uint32_t baud)
+{
+  return user_uart_set_baud(DL_USART, baud);
+}
+
 /*
  * 请求行状态机。
  *
  *   0: 找 '#'      1: 'D'      2: 'L'      3: ' '
  *   4: size（十进制，≤8 位）   5: crc32（十六进制，≤8 位）
+ *   6: baud（十进制，≤7 位，可选字段）
  *
  * 任何不匹配都退回 0 重新找 '#' —— 于是"0x55 0xAA 魔数残留 / 上次的
- * 半行 / 操作员乱敲的字符"都只是被跳过，不需要任何转义或握手。
- * 唯一能返回 1 的路径是收到 '\r' 或 '\n' 且两个字段都非空。
+ * 半行 / 操作员乱敲的字符 / 波特率切换窗口里落进来的错帧字节"都只是
+ * 被跳过，不需要任何转义或握手。唯一能返回 1 的路径是收到 '\r' 或
+ * '\n' 且必填字段都非空。
+ *
+ * 不带 baud 字段（老格式）时按 115200 收尾 —— 老工具零影响。
  */
-int32_t serial_dl_wait_request(uint32_t timeout_ms, uint32_t *size, uint32_t *crc)
+int32_t serial_dl_wait_request(uint32_t timeout_ms, uint32_t *size,
+                               uint32_t *crc, uint32_t *baud)
 {
   uint32_t start;
   uint32_t last_feed;
-  uint32_t sz = 0u, ck = 0u;
-  uint32_t sz_n = 0u, ck_n = 0u;
+  uint32_t sz = 0u, ck = 0u, bd = 0u;
+  uint32_t sz_n = 0u, ck_n = 0u, bd_n = 0u;
   int32_t  c, hv;
   uint8_t  ch;
   uint8_t  st = 0u;
@@ -207,8 +330,33 @@ int32_t serial_dl_wait_request(uint32_t timeout_ms, uint32_t *size, uint32_t *cr
       }
       else if(((ch == '\r') || (ch == '\n')) && (ck_n > 0u))
       {
+        /* 老格式（无 baud 字段）：按缺省波特率收尾 */
         *size = sz;
         *crc  = ck;
+        if(baud != NULL) *baud = SERIAL_DL_BAUD_DEFAULT;
+        return 1;
+      }
+      else if((ch == ' ') && (ck_n > 0u))
+      {
+        st = 6u; bd = 0u; bd_n = 0u;     /* 可选波特率字段 */
+      }
+      else if(ch == '#')      st = 1u;
+      else                    st = 0u;
+      break;
+
+    case 6u:
+      if((ch >= '0') && (ch <= '9'))
+      {
+        bd = (bd * 10u) + (uint32_t)(ch - '0');
+        bd_n++;
+        /* 越界即弃：最长的 921600 也只有 6 位 */
+        if(bd_n > 7u) st = 0u;
+      }
+      else if(((ch == '\r') || (ch == '\n')) && (bd_n > 0u))
+      {
+        *size = sz;
+        *crc  = ck;
+        if(baud != NULL) *baud = serial_dl_check_baud(bd);
         return 1;
       }
       else if(ch == '#')      st = 1u;

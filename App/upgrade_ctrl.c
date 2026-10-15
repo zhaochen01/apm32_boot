@@ -34,32 +34,6 @@
 /* firmware chunk receive buffer; the USART3 ISR writes into it directly */
 static uint8_t up_file_buf[LTE_READ_CHUNK_SIZE];
 
-static uint32_t flash_align_page(uint32_t size)
-{
-  return (size + FLASH_PAGE_SIZE - 1U) & (~(FLASH_PAGE_SIZE - 1U));
-}
-
-static int32_t flash_erase_with_wdt(uint32_t addr, uint32_t size)
-{
-  uint32_t erase_len = flash_align_page(size);
-  uint32_t offset = 0U;
-
-  FMC_Unlock();
-  while(offset < erase_len)
-  {
-    WDT_FEED();
-    if(FMC_ErasePage(addr + offset) != FMC_STATUS_COMPLETE)
-    {
-      FMC_Lock();
-      return -1;                 /* 如实报错，不再吞掉 */
-    }
-    offset += FLASH_PAGE_SIZE;
-  }
-  FMC_Lock();
-  WDT_FEED();
-  return 0;
-}
-
 static int32_t flash_write_with_wdt(uint32_t addr, const uint8_t *data, uint32_t size)
 {
   uint32_t offset = 0U;
@@ -394,8 +368,11 @@ static void upgrade_self_run(void)
  *
  * 协议（PC 侧 = tools/serial_dl.py）：
  *
- *   PC   "#DL <size> <crc32>\r\n"（每 100ms 重发，上电前就开）
- *   DEV  校验 -> 排空 RX -> "#RDY\r\n"
+ *   PC   "#DL <size> <crc32> [baud]\r\n"（每 100ms 重发，上电前就开）
+ *   DEV  校验 -> 排空 RX -> "#RDY\r\n"        （始终以 115200 发出）
+ *   [可选] 双方按请求行里的 baud 切档：
+ *   DEV  排空 -> 切波特率 -> 等 PC 的确认行 -> "#SYNC\r\n"
+ *         确认行必须是与首次相同的 size/crc；失败 -> "#ERR baud" 后复位
  *   DEV  preserve（A 备份到 B，214KB 满槽约 7s）
  *   DEV  排空 RX -> "#GO\r\n"
  *   PC   第 0 页（≤2048B）
@@ -435,6 +412,7 @@ static void upgrade_serial_run(const UPGRADE_CTX_T *ctx)
   UPGRADE_CTX_T c = *ctx;
   uint32_t size = ctx->expect_size;
   uint32_t crc  = ctx->expect_crc;
+  uint32_t baud = ctx->serial_baud;
   uint32_t off  = 0u;
   uint32_t calc = 0u;
   uint8_t *page = up_file_buf;
@@ -446,7 +424,7 @@ static void upgrade_serial_run(const UPGRADE_CTX_T *ctx)
   if(size == 0u)
   {
     printf("[serial] waiting for download request...\r\n");
-    if(!serial_dl_wait_request(SERIAL_DL_REQ_TIMEOUT_MS, &size, &crc))
+    if(!serial_dl_wait_request(SERIAL_DL_REQ_TIMEOUT_MS, &size, &crc, &baud))
     {
       /* 没等到 = 什么都没发生：运行区没被碰过。用 0x5A/NONE 交回引导区
        * 正常启动，而不是 upgrade_abort() 的 FAILED —— 云端根本没下发过，
@@ -505,6 +483,63 @@ static void upgrade_serial_run(const UPGRADE_CTX_T *ctx)
    * 实测就是这么失败的：工具提前收工、停发魔数，复位时引导区啥也没收到。 */
   serial_dl_send("#RDY\r\n");
 
+  /* ---- ②b 波特率协商（可选；PC 没在请求行里带 baud 时整段跳过）----
+   * 【位置是硬约束：必须在 preserve 之前】切换失败时 A/B 一个字节都还没动，
+   * 回 #ERR baud 后干净复位，等于什么都没发生；放到 preserve 之后就要白等
+   * 一次全片拷贝（7s）才失败。
+   *
+   * 双向确认才放行：
+   *   · 确认行证明 PC -> DEV 方向通了（且必须是同一份请求，size/crc 一致——
+   *     只认"PC 确实切过来了"，不认"恰好来了一条像请求行的东西"）
+   *   · #SYNC 证明 DEV -> PC 方向通了，也让上位机不必靠超时来区分
+   *     "切错了" 与 "还在 preserve"，失败反馈从 40s 缩到 2s */
+  if((baud != SERIAL_DL_BAUD_DEFAULT) && (baud != 0u))
+  {
+    uint32_t cs = 0u, cc = 0u;
+
+    /* 排空两次：切换前清 115200 的在途重发残字节，切换后清切换窗口里
+     * 落进来的错帧（错帧本身能被状态机容忍，这里排掉只是为了不让它们
+     * 与确认行拼成一条意外的合法行）。 */
+    serial_dl_flush();
+
+    if(serial_dl_set_baud(baud) != 0)
+    {
+      printf("[serial] set baud %lu failed\r\n", (unsigned long)baud);
+      serial_dl_send("#ERR baud\r\n");
+      iap_upgrade_state_save(0x5A, UPGRADE_STATUS_NONE);
+    }
+
+    serial_dl_flush();
+
+    if((serial_dl_wait_request(SERIAL_DL_BAUD_ACK_MS, &cs, &cc, NULL) != 1) ||
+       (cs != size) || (cc != crc))
+    {
+      printf("[serial] baud switch not confirmed\r\n");
+      serial_dl_send("#ERR baud\r\n");
+      /* 只写过元数据页，运行区/备份区未触碰：NONE 而不是 FAILED ——
+       * 云端根本没下发过，报"升级失败"是假消息（与"没等到请求"同款理由）。 */
+      iap_upgrade_state_save(0x5A, UPGRADE_STATUS_NONE);
+    }
+
+    printf("[serial] baud %lu ok\r\n", (unsigned long)baud);
+    serial_dl_send("#SYNC\r\n");
+
+    /* ---- 【必须等这一下】2026-10-15 实测挖出的根因 ----
+     * 上位机的确认行是【每 100ms 重发 3 次】的（为压过设备"排空 + 切档"的窗口
+     * 而刻意重发）。设备只收下第一条就往下走的话，后两条会晚到 0~200ms ——
+     * 正好落进紧接着的收页窗口，被 DMA 当成【页首数据】搬进 flash，整条字节流
+     * 从此错位。症状：每页都收满、零超时，但整包 CRC 全错；flash 头 24 字节就是
+     * `55 AA #DL 166360 14cfa28c 921600`（实测抓到过）。
+     * 这也解释了"115200 能刷、230400 以上必失败"：不切档就没有确认行，也就没有
+     * 这个尾巴。
+     *
+     * 等 350ms（> 上位机 3 条 × 100ms 的间隔）再走，后面第 ④ 步的 flush 会把
+     * 它们连同别的残字节一起排掉。旧版上位机（仍发 3 条）因此也能被兼容。 */
+    WDT_FEED();
+    Delay_ms(350);
+    WDT_FEED();
+  }
+
   /* ---- ③ preserve：当前 A -> B（回退源）----
    * 整条路径最慢的一步（214KB 满槽擦+拷约 7s）。PC 收到 RDY 后已停发，
    * 所以这里不需要边收边等；但串口上可能还有在途字节，第 ④ 步要排空。 */
@@ -537,24 +572,29 @@ static void upgrade_serial_run(const UPGRADE_CTX_T *ctx)
 
     if(serial_dl_recv(page, chunk, SERIAL_DL_RX_TIMEOUT_MS) < 0)
     {
+      uint32_t dgot = 0u;
+
+      serial_dl_get_rx_diag(&dgot);
+
       serial_dl_send_byte(SERIAL_DL_NAK);   /* 先回 NAK 再打印，别抢线 */
-      printf("[serial] rx timeout at off=%lu\r\n", (unsigned long)off);
+      /* got 是定位"谁丢了字节"的证据：接近满 -> 中途断流；≈0 -> 对端没发 */
+      printf("[serial] rx timeout at off=%lu got=%lu/%lu\r\n",
+             (unsigned long)off, (unsigned long)dgot, (unsigned long)chunk);
       upgrade_abort();   /* 运行区半写：引导区判 A 无效 -> B 槽回退接管 */
     }
 
     /* 【这里刻意不包 __disable_irq()】
-     * 原计划是"擦+写包在临界区里"，但**那个前提是错的**：SDK 的
-     * FMC_ErasePage / FMC_ProgramWord（apm32e10x_fmc.c:254/283/307/321）
-     * 自己无条件 __set_PRIMASK(1) ... __set_PRIMASK(0)，外层 disable 在
-     * 第一次 FMC 调用返回时就被撤销了 —— 包了也只是个"看起来关了中断"
-     * 的假象，比不包更危险。
-     * Flash 的原子性由 SDK 那两句自己保证（每次擦/写内部真关中断）；
+     * 原计划是"擦+写包在临界区里"，但**那个前提是错的**：Flash 写的原子性
+     * 由每个操作内部那两句话自己保证（现为 hw_flash.c 的 fmc_prog_word，
+     * 原先是 SDK FMC_ProgramWord）—— 它自己无条件 __set_PRIMASK(1)...
+     * __set_PRIMASK(0)，外层 disable 在第一次调用返回时就被撤销了，
+     * 包了只是个"看起来关了中断"的假象，比不包更危险。
      * 此刻使能的中断只有 SysTick（加计数）和 TMR5（翻 GPIO），都不碰 FMC。
      * 与 UFS 那条路（flash_write_with_wdt 直接调用）保持一致。
      *
      * 仍然成立的两条铁律：不许 Delay_ms()（它是 SysTick 忙等，真关中断时
      * 会死等）、不许调用自带 __enable_irq() 的函数改变中断状态。 */
-    fres = flash_erase_with_wdt(c.run_addr + off, FLASH_PAGE_SIZE);
+    fres = hw_flash_erase(c.run_addr + off, FLASH_PAGE_SIZE);
     if(fres == 0)
     {
       fres = flash_write_with_wdt(c.run_addr + off, page, chunk);
@@ -594,9 +634,26 @@ static void upgrade_serial_run(const UPGRADE_CTX_T *ctx)
    * 现算 —— 它同时覆盖"PC 发错"和"Flash 写坏"两种故障。 */
   if(calc != crc)
   {
+    uint32_t i;
+
     serial_dl_send_byte(SERIAL_DL_NAK);
     printf("[serial] crc mismatch: calc=0x%08lX expect=0x%08lX\r\n",
            (unsigned long)calc, (unsigned long)crc);
+
+    /* 头 24 字节（flash 原文，十六进制）—— 与 .bin 前 24 字节一比就知道
+     * 是错位、是变换、还是压根不是这份数据。 */
+    printf("[serial] run head:");
+    for(i = 0u; i < 24u; i++)
+    {
+      printf("%02X", (unsigned)*(volatile uint8_t *)(c.run_addr + i));
+    }
+    printf("\r\n");
+
+    /* 【已删】分块指纹（每页一个 CRC32、8 个一行）：2026-10-14 为定位
+     * "每页都收满、整包 CRC 却不对" 而加，当天就用它 + 离线对比锁定了根因
+     * （确认行冗余被当成页首数据）。诊断完即删 —— boot 槽 flash 很紧。
+     * 日后再遇到"收满但内容错"：先看上面的 head 24 字节，再照原样把它加回来
+     * （上位机侧用临时脚本按 2KB 切同一份 .bin 逐页比对即可）。 */
     upgrade_abort();
   }
 
@@ -638,6 +695,16 @@ static void upgrade_serial_run(const UPGRADE_CTX_T *ctx)
   Delay_ms(200);        /* 让 ACK 出完再复位（复位会把 TX 脚打回输入态） */
   NVIC_SystemReset();
 }
+
+/* 【已删】4G 安装路径的分段计时（2026-10-14 加、同日删）。
+ * 它本来是为了给 0x3A 拿第一份实测时间账（此前全是估算），但在同一次改动里
+ * 串口路径要上 USART1 RX DMA，boot 槽 flash 超了 192 字节 —— 计时块的 424B
+ * 正好抵掉。
+ * 日后再给 4G 路径调优（比如把 LTE_READ_CHUNK_SIZE 从 40KB 提上去）时，
+ * 重新加回来：upgrade_run() 的 NETWORK 分支按"阶段边界打点 + 提交前打印"
+ * 加即可，关键是打印【recv 累计】与【纯线速折算 bytes×125/1440】的差值 ——
+ * 那就是每块 QFREAD 的固定开销（AT 往返 + 模组起流延迟），它决定要不要改
+ * 分块大小。见 CLAUDE.md 的已知坑 #20。 */
 
 void upgrade_run(const UPGRADE_CTX_T *ctx)
 {
@@ -717,7 +784,7 @@ void upgrade_run(const UPGRADE_CTX_T *ctx)
 
       /* erase run region before download */
       WDT_FEED();
-      (void)flash_erase_with_wdt(ctx->run_addr, ctx->expect_size);
+      (void)hw_flash_erase(ctx->run_addr, ctx->expect_size);
 
       /* open file and validate size */
       if(at_file_open(&file_ctx, UPGRADE_FILE_NAME) != AT_FILE_ERR_OK)
