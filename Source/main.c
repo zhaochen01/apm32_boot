@@ -39,11 +39,6 @@
 
 
 
-#define DEBUG_USART USART1
-
-
-
-
 // WDT ���Ź� 
 HW_GPIO_INIT_T Hw_WDT_Cfg = { RCM_APB2_PERIPH_GPIOB, GPIOB, GPIO_PIN_0, GPIO_SPEED_10MHz, GPIO_MODE_OUT_PP };
 
@@ -58,20 +53,48 @@ HW_GPIO_INIT_T Hw_SIM_Cfg = { RCM_APB2_PERIPH_GPIOC, GPIOC, GPIO_PIN_9, GPIO_SPE
 
 
 
+/* 极简 GPIO 配置（替掉 SDK 的 GPIO_Config，596B）：本工程每次只配一个引脚，
+ * 只用到 输出推挽 / 复用推挽 / 浮空输入 / 上拉输入 四种，不值得为通用性
+ * 付那 596B。mode 编码与 SDK 的 GPIO_MODE_* 完全一致：低 4 位 = CNF<<2|MODE，
+ * bit7 = “这是输出，要补速度位”。 */
 void hw_gpio_init( HW_GPIO_INIT_T gpio_cfg)
 {
-  	/* Enable GPIO clock */
-	GPIO_Config_T  configStruct;
-  
-  /* Enable the GPIO_LED Clock */
+  uint32_t mode = (uint32_t)gpio_cfg.mode;
+  uint32_t cfg  = mode & 0x0Fu;
+  uint32_t idx  = 0u;
+  uint32_t sh;
+
   RCM_EnableAPB2PeriphClock(gpio_cfg.clk);
 
-  /* Configure the GPIO_LED pin */
-  configStruct.pin 		= gpio_cfg.pin;
-  configStruct.mode 	= gpio_cfg.mode;
-  configStruct.speed 	= gpio_cfg.speed;
+  if((mode & 0x80u) != 0u)                   /* 输出：补上速度位 */
+  {
+    cfg |= (uint32_t)gpio_cfg.speed;
+  }
 
-  GPIO_Config(gpio_cfg.port, &configStruct);
+  while(((uint32_t)(gpio_cfg.pin >> idx) & 1u) == 0u)   /* 引脚掩码 -> 位序号 */
+  {
+    idx++;
+  }
+  sh = (idx & 7u) * 4u;
+
+  if(idx < 8u)
+  {
+    gpio_cfg.port->CFGLOW = (gpio_cfg.port->CFGLOW & ~(0x0Fu << sh)) | (cfg << sh);
+  }
+  else
+  {
+    gpio_cfg.port->CFGHIG = (gpio_cfg.port->CFGHIG & ~(0x0Fu << sh)) | (cfg << sh);
+  }
+
+  /* 上拉/下拉输入要同时设 ODR（与 SDK 行为一致） */
+  if(mode == (uint32_t)GPIO_MODE_IN_PU)
+  {
+    gpio_cfg.port->BSC = gpio_cfg.pin;
+  }
+  else if(mode == (uint32_t)GPIO_MODE_IN_PD)
+  {
+    gpio_cfg.port->BC = gpio_cfg.pin;
+  }
 }
 
 
@@ -89,7 +112,7 @@ void TMR5_IRQHandler(void)
 {
   static uint8_t i = 0;
     
-  if (TMR_ReadIntFlag(TMR5, TMR_INT_UPDATE) == SET)
+  if ((TMR5->STS & (uint32_t)TMR_INT_UPDATE) != 0u)
   {
 //    printf("tim5!\r\n");
       if( i == 0)
@@ -107,7 +130,7 @@ void TMR5_IRQHandler(void)
         i = 0;
       }
     
-    TMR_ClearIntFlag(TMR5, TMR_INT_UPDATE);
+    TMR5->STS = ~(uint32_t)TMR_INT_UPDATE;   /* 该标志是 rc_w0：写 0 清除 */
   }
 }
 
@@ -118,52 +141,46 @@ void TMR5_IRQHandler(void)
  */
 void TIM5_Init_500ms_Interrupt(void)
 {
-    TMR_BaseConfig_T TMR_BaseConfigStruct;
-
+    /* 直写寄存器（替掉 TMR_Reset/TMR_ConfigTimeBase/EnableInterrupt/Enable，
+     * 共约 490B）。本工程只有一个 500ms 更新中断，不需要通用配置层。
+     * APB1 = 36MHz：36MHz / (35999+1) = 1kHz，再 500 次 = 500ms。 */
     RCM_EnableAPB1PeriphClock(RCM_APB1_PERIPH_TMR5);
 
-    TMR_Reset(TMR5);
-  
-    TMR_BaseConfigStruct.clockDivision = TMR_CLOCK_DIV_1;        // ������Ƶ1��ͨ�ö�ʱ��Ĭ��ֵ���Ƴ������DIV4��
-    TMR_BaseConfigStruct.countMode = TMR_COUNTER_MODE_UP;        // ���ϼ���ģʽ
-    // Ԥ��Ƶ��36MHz / (35999 + 1) = 1000Hz��1ms/������
-    TMR_BaseConfigStruct.division = 35999;                      
-    // �Զ���װ��1000Hz �� 500ms = 500�� �� 499��500-1��
-    TMR_BaseConfigStruct.period = 499; 
-    TMR_BaseConfigStruct.repetitionCounter = 0;
-    TMR_ConfigTimeBase(TMR5, &TMR_BaseConfigStruct);
+    TMR5->CTRL1   = 0u;                 /* 停表、向上计数、时钟不分频 */
+    TMR5->PSC     = 35999u;
+    TMR5->AUTORLD = 499u;
+    TMR5->CNT     = 0u;
+    TMR5->CEG     = 1u;                 /* UEG：把 PSC/ARR 装载进影子寄存器 */
+    TMR5->STS     = 0u;                 /* 清掉 UEG 顺带产生的 UIF（rc_w0） */
+    TMR5->DIEN    = (uint32_t)TMR_INT_UPDATE;
 
-    TMR_ClearIntFlag(TMR5, TMR_INT_UPDATE);
-    TMR_EnableInterrupt(TMR5, TMR_INT_UPDATE);
-    NVIC_EnableIRQRequest(TMR5_IRQn, 2, 0);
+    NVIC_EnableIRQ(TMR5_IRQn);          /* 优先级保持复位值 0，与旧调用等效 */
 
-    TMR_Enable(TMR5);
+    TMR5->CTRL1   = 1u;                 /* CNTEN */
 }
 
 
-/**
- * @brief  ��λ����CRC32����׼IEEE 802.3����ʽ��0xEDB88320��
- * @param  data: �������ݻ�����
- * @param  length: ���ݳ��ȣ��ֽ�����
- * @retval ���յ�CRC32ֵ��ȡ����
- */
+/* 16 项半字节表：每轮处理 4 bit。
+ * 比逐位算法快约 2 倍，比 256 项整字节表省约 960B（整表要 1KB）。
+ * 多项式仍是标准 IEEE 802.3 (0xEDB88320)，输出与旧实现逐位一致 ——
+ * 已用 Python 的 zlib.crc32 在随机数据上对拍验证。 */
+static const uint32_t s_crc32_nibble[16] = {
+  0x00000000u, 0x1DB71064u, 0x3B6E20C8u, 0x26D930ACu,
+  0x76DC4190u, 0x6B6B51F4u, 0x4DB26158u, 0x5005713Cu,
+  0xEDB88320u, 0xF00F9344u, 0xD6D6A3E8u, 0xCB61B38Cu,
+  0x9B64C2B0u, 0x86D3D2D4u, 0xA00AE278u, 0xBDBDF21Cu
+};
+
 uint32_t CRC32(uint8_t *data, uint32_t length)
 {
-    uint32_t crc = 0xFFFFFFFF; // ��ʼֵ
-    uint32_t poly = 0xEDB88320; // ��׼CRC32����ʽ������
+    uint32_t crc = 0xFFFFFFFFu;
 
-    for (uint32_t i = 0; i < length; i++)
+    while (length-- != 0u)
     {
-        // ��ǰ�ֽ���CRC��8λ���
-        crc ^= data[i];
-        // ��λ������8λ��
-        for (uint8_t j = 0; j < 8; j++)
-        {
-            // ���ƣ����λΪ1��������ʽ
-            crc = (crc >> 1) ^ ((crc & 0x01) ? poly : 0);
-        }
+        crc ^= (uint32_t)*data++;
+        crc = (crc >> 4) ^ s_crc32_nibble[crc & 0x0Fu];
+        crc = (crc >> 4) ^ s_crc32_nibble[crc & 0x0Fu];
     }
-    // ���ս��ȡ��
     return ~crc;
 }
 
@@ -182,14 +199,15 @@ uint32_t CRC32(uint8_t *data, uint32_t length)
  */
 int main(void)
 {
-	SystemInit();
-	SystemCoreClockUpdate();
+	SystemInit();   /* 72MHz；SystemCoreClock 初值已是 72000000，无需再读回 */
   
   Delay_Init();
 
   // ʹ��SWJ�����أ�����jtag���ء�
   RCM_EnableAPB2PeriphClock(RCM_APB2_PERIPH_AFIO);
-  GPIO_ConfigPinRemap(GPIO_REMAP_SWJ_JTAGDISABLE);
+  /* 关 JTAG、留 SWD：AFIO->REMAP1 的 SWJ_CFG[27:24] = 0010。
+   * 与 GPIO_ConfigPinRemap(GPIO_REMAP_SWJ_JTAGDISABLE) 等价（那函数要 92B）。 */
+  AFIO->REMAP1 = (AFIO->REMAP1 & 0xF0FFFFFFu) | 0x02000000u;
  
   hw_gpio_init(Hw_WDT_Cfg);
   hw_gpio_init(Hw_RUN_Cfg);
@@ -248,8 +266,8 @@ int main(void)
 
           memset(&sctx, 0, sizeof(sctx));
           sctx.action      = UPGRADE_ACTION_SERIAL;
-          sctx.run_addr    = upgrade_cfg.app_addr;
-          sctx.backup_addr = upgrade_cfg.fw1_addr;
+          sctx.run_addr    = APP_ADDR;
+          sctx.backup_addr = UP_BACKUP_ADDR;
           sctx.expect_size = dl_sz;
           sctx.expect_crc  = dl_crc;
           sctx.serial_baud = dl_baud;   /* 请求行里协商的波特率（缺省 115200） */
@@ -302,8 +320,8 @@ int main(void)
         UPGRADE_CTX_T uctx;
         memset(&uctx, 0, sizeof(uctx));
         uctx.action      = UPGRADE_ACTION_NETWORK;
-        uctx.run_addr    = upgrade_cfg.app_addr;
-        uctx.backup_addr = upgrade_cfg.fw1_addr;
+        uctx.run_addr    = APP_ADDR;
+        uctx.backup_addr = UP_BACKUP_ADDR;
         uctx.expect_size = ufs_sz;
 
         /* 有元数据可比对就全量校验；否则退化为"只看大小"并告警。
@@ -340,32 +358,8 @@ int main(void)
 
 
 
-#if defined (__CC_ARM) || defined (__ICCARM__) || (defined(__ARMCC_VERSION) && (__ARMCC_VERSION >= 6010050))
-
-/*!
-* @brief       Redirect C Library function printf to serial port.
-*              After Redirection, you can use printf function.
-*
-* @param       ch:  The characters that need to be send.
-*
-* @param       *f:  pointer to a FILE that can recording all information
-*              needed to control a stream
-*
-* @retval      The characters that need to be send.
-*
-* @note
-*/
-int fputc(int ch, FILE* f)
-{
- // __disable_irq();
-  uart_send_data(DEBUG_USART, &ch, 1);
-//  __enable_irq();
-  return (ch);
-}
-
-#else
-#warning Not supported compiler type
-#endif
+/* printf / snprintf 的实现在 App/boot_printf.c —— 自写极简格式化器，
+ * 替掉了库的 printf 引擎与 fputc 重定向；输出通道仍是 USART1。 */
 
 /**@} end of group USART_Interrupt_Functions */
 /**@} end of group USART_Interrupt */

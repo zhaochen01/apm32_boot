@@ -26,7 +26,6 @@
 #include "serial_dl.h"   /* serial_dl_take_request()：串口下载请求标志 */
 
 Upgrade_t upgrade;
-Upgrade_cfg_t upgrade_cfg;
 
 extern uint32_t CRC32(uint8_t *data, uint32_t length);
 
@@ -39,8 +38,8 @@ extern uint32_t CRC32(uint8_t *data, uint32_t length);
 static void iap_state_flush(void)
 {
   __disable_irq();
-  hw_flash_erase(upgrade_cfg.config_addr, FLASH_PAGE_SIZE);
-  hw_flash_write(upgrade_cfg.config_addr, &upgrade, sizeof(upgrade));
+  hw_flash_erase(UPGRADE_ADDR, FLASH_PAGE_SIZE);
+  hw_flash_write(UPGRADE_ADDR, &upgrade, sizeof(upgrade));
   __enable_irq();
 
   /* 回读校验 —— 这里失败【绝不能再复位】。
@@ -52,7 +51,7 @@ static void iap_state_flush(void)
    *
    * 用回读而不是查 FMC_ErasePage/FMC_ProgramWord 的返回码：回读是唯一能同时
    * 覆盖"擦除失败"和"写入失败"的判据，也不依赖 SDK 状态位是否正确。 */
-  if(memcmp((const void *)upgrade_cfg.config_addr, &upgrade, sizeof(upgrade)) != 0)
+  if(memcmp((const void *)UPGRADE_ADDR, &upgrade, sizeof(upgrade)) != 0)
   {
     printf("[iap] metadata verify FAILED -> park (no reset)\r\n");
     for(;;)
@@ -168,62 +167,22 @@ static int32_t expect_params_ok(uint32_t size, uint32_t crc, uint32_t max_size)
  */
 int32_t iap_init(UPGRADE_CTX_T *ctx)
 {
-  Upgrade_cfg_t *upgrade_cfg_temp;
-  uint8_t cfg_need_init = 0;
   int32_t app_ok, bak_ok;
 
   if(ctx == NULL) return IAP_ACT_PARK;
   memset(ctx, 0, sizeof(*ctx));
 
-  upgrade_cfg_temp = (Upgrade_cfg_t *)UPGRADE_CFG_ADDR;
+  /* 槽地址直接用编译期常量。
+   * 原实现把三个地址存进 0x0807E800 的 Upgrade_cfg_t（带 CRC 校验和
+   * "布局不符则重建"逻辑），理由是"改地址不必重编译"。但实际从不这么做 ——
+   * 地址同时钉死在散列文件、引导区 boot.h 和两个 APP 里，改一处就得全改；
+   * 且那张配置页没有任何其他工程读它（2026-10-19 在 Collector-4G /
+   * IoT-4G-v2 / apm32_e103_bootstrap 三个仓库 grep 确认）。整套机制删除：
+   * 省一个全局结构、首次启动的一页 Flash 擦写，以及 iap_init 里的分支。 */
+  ctx->run_addr    = APP_ADDR;
+  ctx->backup_addr = UP_BACKUP_ADDR;
 
-  /* cfg: use when crc matches AND addresses fit the current layout;
-   * re-init on first boot / crc error / old-layout migration */
-  if(upgrade_cfg_temp->data_crc != 0xFFFFFFFF)
-  {
-    uint32_t crc = CRC32((uint8_t *)UPGRADE_CFG_ADDR, sizeof(Upgrade_cfg_t) - sizeof(uint32_t));
-    if(crc == upgrade_cfg_temp->data_crc)
-    {
-      memcpy(&upgrade_cfg, upgrade_cfg_temp, sizeof(Upgrade_cfg_t));
-      if((upgrade_cfg.app_addr != APP_ADDR) || (upgrade_cfg.fw1_addr != UP_BACKUP_ADDR))
-      {
-        printf("upgrade_cfg layout mismatch, re-init\r\n");
-        cfg_need_init = 1;
-      }
-    }
-    else
-    {
-      printf("upgrade_cfg crc error!\r\n");
-      cfg_need_init = 1;
-    }
-  }
-  else
-  {
-    cfg_need_init = 1;
-  }
-
-  if(cfg_need_init)
-  {
-    memset(&upgrade_cfg, '\0', sizeof(Upgrade_cfg_t));
-
-    upgrade_cfg.config_addr = UPGRADE_ADDR;
-    upgrade_cfg.app_addr    = APP_ADDR;
-    upgrade_cfg.fw1_addr    = UP_BACKUP_ADDR;
-    upgrade_cfg.fw2_addr    = UP_BACKUP_ADDR;   /* unused, keep valid */
-    upgrade_cfg.data_crc    = CRC32((uint8_t *)&upgrade_cfg, sizeof(Upgrade_cfg_t) - sizeof(uint32_t));
-
-    /* disable interrupts while writing flash inside */
-    __disable_irq();
-    hw_flash_erase(UPGRADE_CFG_ADDR, FLASH_PAGE_SIZE);
-    hw_flash_write(UPGRADE_CFG_ADDR, &upgrade_cfg, sizeof(Upgrade_cfg_t));
-    __enable_irq();
-  }
-
-  /* 所有分支共用：运行槽 / 备份槽地址 */
-  ctx->run_addr    = upgrade_cfg.app_addr;
-  ctx->backup_addr = upgrade_cfg.fw1_addr;
-
-  memcpy(&upgrade, (void *)upgrade_cfg.config_addr, sizeof(Upgrade_t));
+  memcpy(&upgrade, (void *)UPGRADE_ADDR, sizeof(Upgrade_t));
 
   /* print metadata summary for debug log */
   printf("upgrade.flag=0x%X, fw_flag=%d, status=0x%X, up_count=%d\r\n",

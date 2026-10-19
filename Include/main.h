@@ -46,13 +46,23 @@
 
 
 
-#define VERSION "2.4.0.119\0"
+#define VERSION "2.5.0.100\0"
 
 
 #define FLASH_PAGE_SIZE 2048
 
 
 void USART3_Isr(void);
+
+/* ---- 极简格式化输出（App/boot_printf.c）----
+ * 只支持 %s / %d / %u / %X / %02X / %lu / %08lX（+ %c / %%），
+ * 替掉了 C 库的 printf 引擎（省约 1.1KB）。
+ * 用宏重定向而不是直接定义 printf：直接定义时编译器会把 printf("字面量")
+ * 优化成库的 puts，把整条 stdio 链又拉回来（实测链接期 printfa.o 重复定义）。 */
+int  boot_printf(const char *format, ...);
+int  boot_snprintf(char *str, uint32_t size, const char *format, ...);
+#define printf    boot_printf
+#define snprintf  boot_snprintf
 
 
 

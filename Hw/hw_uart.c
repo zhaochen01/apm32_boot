@@ -1,92 +1,65 @@
 
-
 #include "main.h"
 #include "hw_uart.h"
 
+/* 本工程只有两个口：USART1（调试 + 串口刷机）、USART3（4G 模块），
+ * 配置固定 8N1 / 无流控 / 115200。原来那张“通用多口表 + 循环”是为 N 个口
+ * 准备的，实际只有 2 个，而且最后还得靠 if 区分 APB1/APB2 时钟 —— 直写更短。
+ * 时钟：APB2 = 72MHz（USART1），APB1 = 36MHz（USART3）。
+ *
+ * 寄存器直写替掉 SDK 的 USART_Config（152B）+ RCM_ReadPCLKFreq（156B）：
+ * 后者只是为了在运行时问出 PCLK，而这里的 PCLK 是编译期常量。 */
+#define UART_PCLK2_HZ   72000000u
+#define UART_PCLK1_HZ   36000000u
 
-/* USART1 TX Buf */
-/* USART2 RX Buf */
+/* 8N1 + TX + RX + UEN。CTRL1 位：RXEN=bit2、TXEN=bit3、UEN=bit13；
+ * STS 位：TC=bit6、TXBE=bit7。 */
+#define UART_CTRL1_8N1_TX_RX    ((1u << 13) | (1u << 3) | (1u << 2))
+#define UART_STS_TC             (1u << 6)
+#define UART_STS_TXBE           (1u << 7)
 
-
-
-
-
-				
-
-typedef struct
+/* 与 SDK USART_Config 逐字相同的算式（含截断方式），保证换实现后波特率
+ * 一个 LSB 都不差。div = 100 × USARTDIV，高 12 位是整数、低 4 位是 1/16。 */
+static uint32_t uart_br(uint32_t pclk, uint32_t baud)
 {
-	USART_T*  						uart;
-	uint32_t							baudRate;
-	uint32_t							mode;
-	uint32_t 							uart_clk;
-	
-  HW_GPIO_INIT_T        tx_gpio;
-	
-  HW_GPIO_INIT_T        rx_gpio;
-}User_Uart_Config_T;
+  uint32_t div = (25u * pclk) / (4u * baud);
+  uint32_t br  = (div / 100u) << 4;
+  uint32_t frac = div - (100u * (br >> 4));
 
+  return br | (((frac * 16u) + 50u) / 100u & 0x0Fu);
+}
 
-
-User_Uart_Config_T uart_cfg_list[] = 
+static void uart_hw_init(USART_T *u, uint32_t pclk, uint32_t baud)
 {
-	{ USART1, 115200, USART_MODE_TX_RX, RCM_APB2_PERIPH_USART1,\
-		RCM_APB2_PERIPH_GPIOA, GPIOA, GPIO_PIN_9,  GPIO_SPEED_50MHz, GPIO_MODE_AF_PP,\
-		RCM_APB2_PERIPH_GPIOA, GPIOA, GPIO_PIN_10, GPIO_SPEED_50MHz, GPIO_MODE_IN_FLOATING
-	},
-	
-	{ USART3, 115200, USART_MODE_TX_RX, RCM_APB1_PERIPH_USART3,\
-		RCM_APB2_PERIPH_GPIOB, GPIOB, GPIO_PIN_10, GPIO_SPEED_50MHz, GPIO_MODE_AF_PP,\
-		RCM_APB2_PERIPH_GPIOB, GPIOB, GPIO_PIN_11, GPIO_SPEED_50MHz, GPIO_MODE_IN_PU
-	},
-	
-};
-
-#define HW_USART_NUM          (sizeof(uart_cfg_list) / sizeof( User_Uart_Config_T ))
-
+  u->CTRL1 = UART_CTRL1_8N1_TX_RX;
+  u->CTRL2 = 0u;                     /* 1 个停止位 */
+  u->CTRL3 = 0u;                     /* 无硬件流控、无 DMA */
+  u->BR    = uart_br(pclk, baud);
+}
 
 void user_uart_init(void)
 {
-	GPIO_Config_T g_configStruct;
-	USART_Config_T u_configStruct;
+  static const HW_GPIO_INIT_T u1_tx = { RCM_APB2_PERIPH_GPIOA, GPIOA, GPIO_PIN_9,
+                                        GPIO_SPEED_50MHz, GPIO_MODE_AF_PP };
+  static const HW_GPIO_INIT_T u1_rx = { RCM_APB2_PERIPH_GPIOA, GPIOA, GPIO_PIN_10,
+                                        GPIO_SPEED_50MHz, GPIO_MODE_IN_FLOATING };
+  static const HW_GPIO_INIT_T u3_tx = { RCM_APB2_PERIPH_GPIOB, GPIOB, GPIO_PIN_10,
+                                        GPIO_SPEED_50MHz, GPIO_MODE_AF_PP };
+  static const HW_GPIO_INIT_T u3_rx = { RCM_APB2_PERIPH_GPIOB, GPIOB, GPIO_PIN_11,
+                                        GPIO_SPEED_50MHz, GPIO_MODE_IN_PU };
 
-  User_Uart_Config_T *uart_cfg;
-	for(uint8_t i = 0; i < HW_USART_NUM; i++)
-	{
-    uart_cfg = &uart_cfg_list[i];
-		if (uart_cfg->uart == USART1)	RCM_EnableAPB2PeriphClock(uart_cfg->uart_clk);
-    else 													RCM_EnableAPB1PeriphClock(uart_cfg->uart_clk);
-		
-		/* Enable GPIO clock */
-	  RCM_EnableAPB2PeriphClock(uart_cfg->tx_gpio.clk);
-		RCM_EnableAPB2PeriphClock(uart_cfg->rx_gpio.clk);
-		
-		/* Configure USART Tx as alternate function push-pull */
-    g_configStruct.mode 	= uart_cfg->tx_gpio.mode;
-    g_configStruct.pin 	  = uart_cfg->tx_gpio.pin;
-    g_configStruct.speed  = uart_cfg->tx_gpio.speed;
-    GPIO_Config(uart_cfg->tx_gpio.port, &g_configStruct);
+  /* 引脚（同时开 GPIO 时钟） */
+  hw_gpio_init(u1_tx);
+  hw_gpio_init(u1_rx);
+  hw_gpio_init(u3_tx);
+  hw_gpio_init(u3_rx);
 
-    /* Configure USART Rx as input floating */
-    g_configStruct.mode 	= uart_cfg->rx_gpio.mode;
-    g_configStruct.pin 	  = uart_cfg->rx_gpio.pin;
-//    g_configStruct.speed  = uart_cfg->rx_gpio.speed;
-    GPIO_Config(uart_cfg->rx_gpio.port, &g_configStruct);
-		
-		/* USART configuration */
-		u_configStruct.baudRate 		= uart_cfg->baudRate;
-    u_configStruct.hardwareFlow = USART_HARDWARE_FLOW_NONE;
-    u_configStruct.mode 				= uart_cfg->mode;
-		u_configStruct.wordLength 	= USART_WORD_LEN_8B;
-    u_configStruct.parity 			= USART_PARITY_NONE;
-    u_configStruct.stopBits 		= USART_STOP_BIT_1;
-    USART_Config(uart_cfg->uart, &u_configStruct);
+  RCM_EnableAPB2PeriphClock(RCM_APB2_PERIPH_USART1);
+  RCM_EnableAPB1PeriphClock(RCM_APB1_PERIPH_USART3);
 
-    /* Enable USART */
-    USART_Enable(uart_cfg->uart);
-	}
+  uart_hw_init(USART1, UART_PCLK2_HZ, 115200u);
+  uart_hw_init(USART3, UART_PCLK1_HZ, 115200u);
 }
-
-
 
 
 /* TXBE 等待上限。正常情形下写 DR 后一个字节时间（115200 约 87us）就置位，
@@ -106,11 +79,11 @@ int32_t uart_send_data(USART_T *usart, void *pdata, uint32_t len)
 	for( i= 0; i < len; i++)
 	{
 		/* send a byte of data to the serial port */
-		USART_TxData(usart, *(uint8_t *)pdata++ );
+		usart->DATA = *(uint8_t *)pdata++;
 
 		/* wait for the data to be send  */
 		guard = UART_TXBE_WAIT_MAX;
-		while((USART_ReadStatusFlag(usart, USART_FLAG_TXBE) == RESET) && (guard != 0u))
+		while(((usart->STS & UART_STS_TXBE) == 0u) && (guard != 0u))
 		{
 			guard--;
 		}
@@ -132,20 +105,21 @@ int32_t uart_send_data(USART_T *usart, void *pdata, uint32_t len)
  * 前刚发完的就是控制字 "#RDY\r\n"，它一乱整个按页 ACK 协议立刻错位。
  * TC=1 才代表最后一个 bit 已经出线。
  *
- * 复用 SDK 的 USART_Config：它对 CTRL1/2/3 都是掩码改写（0xE9F3/0xCFFF/
- * 0xFCFF），UE/TE/RE 与中断配置都不受影响，运行中重配是安全的。
- * 帧格式固定 8N1（与 uart_cfg_list 一致）。 */
+ * 【只写 BR】帧格式（CTRL1/2/3）没变，重写它们只会带来风险 —— 尤其 CTRL3
+ * 里可能已经开着 DMA 接收（serial_dl 的收页路径）。旧实现走 USART_Config，
+ * 对三个控制寄存器做掩码改写，虽然也安全，但没必要。
+ */
 int32_t user_uart_set_baud(USART_T *usart, uint32_t baud)
 {
-	USART_Config_T cfg;
 	uint32_t guard = UART_TXBE_WAIT_MAX;
+	uint32_t pclk;
 
 	if((usart == NULL) || (baud == 0u))
 	{
 		return -1;
 	}
 
-	while((USART_ReadStatusFlag(usart, USART_FLAG_TXC) == RESET) && (guard != 0u))
+	while(((usart->STS & UART_STS_TC) == 0u) && (guard != 0u))
 	{
 		guard--;
 	}
@@ -154,13 +128,8 @@ int32_t user_uart_set_baud(USART_T *usart, uint32_t baud)
 		return -1;
 	}
 
-	cfg.baudRate	    = baud;
-	cfg.hardwareFlow  = USART_HARDWARE_FLOW_NONE;
-	cfg.mode		      = USART_MODE_TX_RX;
-	cfg.wordLength	  = USART_WORD_LEN_8B;
-	cfg.parity		    = USART_PARITY_NONE;
-	cfg.stopBits	    = USART_STOP_BIT_1;
-	USART_Config(usart, &cfg);
+	pclk = (usart == USART1) ? UART_PCLK2_HZ : UART_PCLK1_HZ;
+	usart->BR = uart_br(pclk, baud);
 
 	return 0;
 }

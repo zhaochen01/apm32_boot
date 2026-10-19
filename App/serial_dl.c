@@ -48,13 +48,17 @@ void serial_dl_flush(void)
  *
  * 只在 getc 里【按位累加】，不改变状态：先读一次 STS（ORE/FE/NE/RXBNE 都在里面），
  * 再按需读 DATA —— 读 STS+DR 正是清 ORE 的规定序列。 */
+/* noinline：去掉库调用后本函数变成纯寄存器读，-O2 会把它复制进 flush /
+ * wait_request / recv 三个调用点（实测 +280B）。握手阶段每字节 87µs 的预算，
+ * 一次函数调用的开销可以忽略。 */
+__attribute__((noinline))
 int32_t serial_dl_getc(void)
 {
   uint32_t sts = DL_USART->STS;
 
   if((sts & (uint32_t)USART_FLAG_RXBNE) != 0u)
   {
-    return (int32_t)(uint8_t)USART_RxData(DL_USART);
+    return (int32_t)(uint8_t)DL_USART->DATA;   /* 直读 DR（库版是 8B 的包装） */
   }
 
   /* ============ 本工程最贵的一课（2026-10-14 实测）============
@@ -120,32 +124,31 @@ static void serial_dl_feed_soft(uint32_t *last)
  * 【协议不变】：收的还是同样多字节，只是搬运工换了人 —— 上位机与旧工具
  * 都不受影响。握手阶段（等请求行）仍走轮询 getc：那一次只有几十字节，
  * 而且状态机本来就要求逐字节看内容。 */
-#define DL_DMA_CH       DMA1_Channel5   /* USART1_RX 固定映射 DMA1 通道 5（F1 系映射） */
-#define DL_DMA_FLAGS    ((uint32_t)(DMA1_FLAG_GINT5 | DMA1_FLAG_TC5 | \
-                                    DMA1_FLAG_HT5 | DMA1_FLAG_TERR5))
+/* USART1_RX 固定映射到 DMA1 通道 5（F1 系）。这里直写寄存器，替掉 SDK 的
+ * DMA_Reset(268B，里面是 12 个通道的 if 链) + DMA_Config(134B) + 四个开关/
+ * 查询函数（约 100B）—— 只用一个通道、一种配置，通用层不值得。
+ *
+ * CHCFG 位：EN=0、MINC=7、PL=13:12、DIR=4(0=P->M)、SIZE=9:8/11:10(0=8bit)
+ * 本次配置 = MINC | 最高优先级 | 8bit/8bit | 外设→内存  ->  0x3081（含 EN） */
+#define DL_DMA_CH          DMA1_Channel5
+#define DL_DMA_CFG_EN      0x00003081u
+#define DL_DMA_TCIF5       (1u << 17)   /* 通道 5 的四个标志在 INTSTS[19:16] */
+#define DL_DMA_TEIF5       (1u << 19)
+#define DL_DMA_ALL_FLAGS   (0x000F0000u)
 
-static uint8_t      s_dma_ready = 0u;
-static DMA_Config_T s_dma_cfg;
+static uint8_t s_dma_ready = 0u;
 
 static void serial_dl_dma_setup(void)
 {
   RCM_EnableAHBPeriphClock(RCM_AHB_PERIPH_DMA1);
-  DMA_Reset(DL_DMA_CH);
 
-  DMA_ConfigStructInit(&s_dma_cfg);
-  s_dma_cfg.peripheralBaseAddr = (uint32_t)(&DL_USART->DATA);
-  s_dma_cfg.dir                = DMA_DIR_PERIPHERAL_SRC;
-  s_dma_cfg.peripheralInc      = DMA_PERIPHERAL_INC_DISABLE;
-  s_dma_cfg.memoryInc          = DMA_MEMORY_INC_ENABLE;
-  s_dma_cfg.peripheralDataSize = DMA_PERIPHERAL_DATA_SIZE_BYTE;
-  s_dma_cfg.memoryDataSize     = DMA_MEMORY_DATA_SIZE_BYTE;
-  s_dma_cfg.loopMode           = DMA_MODE_NORMAL;     /* 一页一次，不用环形 */
-  s_dma_cfg.priority           = DMA_PRIORITY_VERYHIGH;   /* 收页期间没有别的 DMA 用户 */
-  s_dma_cfg.M2M                = DMA_M2MEN_DISABLE;
-  /* memoryBaseAddr / bufferSize 每页重设 */
+  DL_DMA_CH->CHCFG   = 0u;                        /* 关通道再改配置 */
+  DL_DMA_CH->CHNDATA = 0u;
+  DL_DMA_CH->CHPADDR = (uint32_t)(&DL_USART->DATA);
+  DL_DMA_CH->CHMADDR = 0u;
 
-  DMA_ClearStatusFlag(DL_DMA_FLAGS);
-  USART_EnableDMA(DL_USART, USART_DMA_RX);
+  DMA1->INTFCLR = DL_DMA_ALL_FLAGS;               /* 写 1 清通道 5 的四个标志 */
+  DL_USART->CTRL3 |= (1u << 6);                   /* DMARXEN */
   s_dma_ready = 1u;
 }
 
@@ -169,35 +172,38 @@ int32_t serial_dl_recv(uint8_t *buf, uint32_t len, uint32_t timeout_ms,
    * —— 见 getc 里为什么必须无条件清。 */
   serial_dl_flush();
 
-  s_dma_cfg.memoryBaseAddr = (uint32_t)buf;
-  s_dma_cfg.bufferSize     = len;
-  DMA_Config(DL_DMA_CH, &s_dma_cfg);      /* DMA_Config 只写配置寄存器，不使能通道 */
-  DMA_ClearStatusFlag(DL_DMA_FLAGS);
-  DMA_Enable(DL_DMA_CH);
+  DL_DMA_CH->CHNDATA = len;
+  DL_DMA_CH->CHMADDR = (uint32_t)buf;
+  DMA1->INTFCLR      = DL_DMA_ALL_FLAGS;
+  DL_DMA_CH->CHCFG   = DL_DMA_CFG_EN;     /* 地址/计数就绪后一次写入并置 EN */
 
   start     = Delay_GetTick();
   last_feed = start;
 
-  while(DMA_ReadStatusFlag(DMA1_FLAG_TC5) == RESET)
+  for(;;)
   {
-    if((DMA_ReadStatusFlag(DMA1_FLAG_TERR5) != RESET) ||
+    if((DMA1->INTSTS & DL_DMA_TCIF5) != 0u)
+    {
+      break;
+    }
+    if(((DMA1->INTSTS & DL_DMA_TEIF5) != 0u) ||
        ((uint32_t)(Delay_GetTick() - start) >= timeout_ms))
     {
       /* 超时/传输出错：把【已搬进来的字节数】交出去 —— 它区分
-       * "对端没发"（接近 0）与"中途断流"（接近满）。 */
+       * "对端没发"（接近 0）与"中途断流"（接近满）。CHNDATA 是剩余数。 */
       if(got != NULL)
       {
-        *got = len - (uint32_t)DMA_ReadDataNumber(DL_DMA_CH);
+        *got = len - (uint32_t)DL_DMA_CH->CHNDATA;
       }
-      DMA_Disable(DL_DMA_CH);
-      DMA_ClearStatusFlag(DL_DMA_FLAGS);
+      DL_DMA_CH->CHCFG = 0u;
+      DMA1->INTFCLR    = DL_DMA_ALL_FLAGS;
       return -1;
     }
     serial_dl_feed_soft(&last_feed);
   }
 
-  DMA_Disable(DL_DMA_CH);
-  DMA_ClearStatusFlag(DL_DMA_FLAGS);
+  DL_DMA_CH->CHCFG = 0u;
+  DMA1->INTFCLR    = DL_DMA_ALL_FLAGS;
   if(got != NULL) *got = len;
   return (int32_t)len;
 }

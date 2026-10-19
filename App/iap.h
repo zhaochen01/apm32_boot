@@ -5,7 +5,6 @@
 #include "upgrade_ctrl.h"   /* UPGRADE_CTX_T / UPGRADE_ACTION_T（仅依赖 stdint.h，无环） */
 
 #define UPGRADE_ADDR       0x807E000
-#define UPGRADE_CFG_ADDR   0x807E800
 #define APP_ADDR           0x800F000   /* APP A 运行槽: 0xF000 + 214KB */
 #define UP_BACKUP_ADDR     0x8044800   /* APP B 备份槽: 0x44800 + 214KB */
 
@@ -76,21 +75,14 @@ typedef struct
 #pragma pack(pop)     // �ָ�֮ǰ�Ķ�������
 
 
-typedef struct
-{
-  uint32_t config_addr;
-  uint32_t app_addr;
-  uint32_t fw1_addr;
-  uint32_t fw2_addr;
-  uint32_t data_crc;            // ���ṹ�����ݵ�crcУ��ֵ
-}Upgrade_cfg_t;
-
+/* Upgrade_cfg_t（0x0807E800 的地址配置页）已于 2026-10-19 删除：
+ * 三个地址本来就是编译期常量，而那张页没有任何其他工程读。
+ * 该 2KB 页现在空闲，未分配给任何用途。 */
 
 /* Jump_to_App() 已于 2026-09-17 删除：新架构下跳 APP 由引导区负责，
  * 升级 boot 只做"装 APP / 修 APP"，干完 NVIC_SystemReset() 交回。
  * 留着它就等于在同一个文件里放着第二套跳转实现，日后接回去就绕过了引导区的决策。 */
 extern Upgrade_t upgrade;
-extern Upgrade_cfg_t upgrade_cfg;
 extern int32_t iap_init(UPGRADE_CTX_T *ctx);
 extern void iap_upgrade_state_save(uint8_t flag, uint8_t status);
 extern void iap_state_save(void);   /* 只落盘、不复位（备份成功后立即固化 fw[1]） */

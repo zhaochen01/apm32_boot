@@ -68,12 +68,15 @@ void hw_uart3_init(const HW_UART3_CALLBACKS_T *callbacks)
   memset(&s_uart3, 0, sizeof(s_uart3));
   s_uart3.mode = UART3_MODE_LINE;
 
-  /* note: USART3 peripheral itself is configured by user_uart_init() */
-  USART_ClearIntFlag(USART3, USART_INT_RXBNE);
-  USART_EnableInterrupt(USART3, USART_INT_RXBNE);
-  USART_EnableInterrupt(USART3, USART_INT_ERR);
+  /* note: USART3 peripheral itself is configured by user_uart_init()
+   * 直写寄存器：RXBNE 标志 = STS.bit5（rc_w0），RXBNEIEN = CTRL1.bit5，
+   * 错误中断 EIE = CTRL3.bit0。NVIC 优先级保持复位值 0 —— 与旧调用等效
+   * （旧 NVIC_EnableIRQRequest 在默认优先级分组下算出的也是 0）。 */
+  USART3->STS   = ~(1u << 5);
+  USART3->CTRL1 |= (1u << 5);
+  USART3->CTRL3 |= (1u << 0);
 
-  NVIC_EnableIRQRequest(USART3_IRQn, 1, 0);
+  NVIC_EnableIRQ(USART3_IRQn);
 }
 
 void hw_uart3_send_bytes(const uint8_t *data, uint32_t len)
@@ -170,9 +173,11 @@ uint8_t hw_uart3_take_fault_snapshot(uint32_t *recv_len, uint32_t *expect_len,
 void USART3_Isr(void)
 {
   uint8_t dat = 0U;
-  uint8_t ovre_flag = USART_ReadStatusFlag(USART3, USART_FLAG_OVRE);
-  uint8_t fe_flag = USART_ReadStatusFlag(USART3, USART_FLAG_FE);
-  uint8_t ne_flag = USART_ReadStatusFlag(USART3, USART_FLAG_NE);
+  uint32_t sts = USART3->STS;
+  /* 一次读 STS 取出三个错误位（NE=2、FE=1、ORE=3），比调三次库函数短 */
+  uint8_t ovre_flag = ((sts & (1u << 3)) != 0u) ? 1U : 0U;
+  uint8_t fe_flag   = ((sts & (1u << 1)) != 0u) ? 1U : 0U;
+  uint8_t ne_flag   = ((sts & (1u << 2)) != 0u) ? 1U : 0U;
 
   if((ovre_flag != RESET) || (fe_flag != RESET) || (ne_flag != RESET))
   {
@@ -203,9 +208,9 @@ void USART3_Isr(void)
     return;
   }
 
-  if(USART_ReadIntFlag(USART3, USART_INT_RXBNE))
+  if((sts & (1u << 5)) != 0u)          /* RXBNE = bit5 */
   {
-    dat = (uint8_t)USART_RxData(USART3);
+    dat = (uint8_t)USART3->DATA;
 
     if(s_uart3.mode == UART3_MODE_RAW)
     {

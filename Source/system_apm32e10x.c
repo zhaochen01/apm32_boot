@@ -112,26 +112,53 @@ static void SystemClock120M(void);
  */
 void SystemInit (void)
 {
-    /** Set HSIEN bit */
+    /* 直配 72MHz：HSE 8MHz -> PLL x9 -> SYSCLK 72MHz；AHB /1、APB2 /1、APB1 /2。
+     * 原实现是一张“时钟档位”分派表（HSE/24/36/48/56/72/96/120MHz 各一份
+     * static 函数）+ 运行时读回时钟的 SystemCoreClockUpdate()，编进镜像约
+     * 494B；本工程只用 72MHz 一档，且 SystemCoreClock 的初值在下面已经
+     * 就是 72000000，不需要再读回。 */
+    __IO uint32_t i;
+
     RCM->CTRL_B.HSIEN = BIT_SET;
-    /** Reset SCLKSEL, AHBPSC, APB1PSC, APB2PSC, ADCPSC and MCOSEL bits */
-    RCM->CFG &= (uint32_t)0xF8FF0000;
-    /** Reset HSEEN, CSSEN and PLLEN bits */
-    RCM->CTRL &= (uint32_t)0xFEF6FFFF;
-    /** Reset HSEBCFG bit */
+    RCM->CFG &= (uint32_t)0xF8FF0000;      /* 清 SCLKSEL/AHBPSC/APB1PSC/APB2PSC... */
+    RCM->CTRL &= (uint32_t)0xFEF6FFFF;     /* 清 HSEEN/CSSEN/PLLEN */
     RCM->CTRL_B.HSEBCFG = BIT_RESET;
-    /** Reset PLLSRCSEL, PLLHSEPSC, PLLMULCFG and USBDIV bits */
-    RCM->CFG &= (uint32_t)0xFF80FFFF;
-    /** Disable all interrupts and clear pending bits */
+    RCM->CFG &= (uint32_t)0xFF80FFFF;      /* 清 PLLSRCSEL/PLLHSEPSC/PLLMULCFG/USBDIV */
     RCM->INT = 0x009F0000;
 
-    SystemClockConfig();
+    RCM->CTRL_B.HSEEN = BIT_SET;
+    for(i = 0; i < HSE_STARTUP_TIMEOUT; i++)
+    {
+        if(RCM->CTRL_B.HSERDYFLG)
+        {
+            break;
+        }
+    }
 
-#ifdef VECT_TAB_SRAM
-    SCB->VTOR = SRAM_BASE | VECT_TAB_OFFSET;
-#else
-    SCB->VTOR = FMC_BASE | VECT_TAB_OFFSET;
-#endif
+    if(RCM->CTRL_B.HSERDYFLG)
+    {
+        FMC->CTRL1_B.PBEN = BIT_SET;       /* 预取 */
+        FMC->CTRL1_B.WS   = 2;             /* 72MHz 需要 2 个等待周期 */
+
+        RCM->CFG_B.AHBPSC  = 0;            /* HCLK = SYSCLK */
+        RCM->CFG_B.APB2PSC = 0;            /* PCLK2 = HCLK = 72MHz */
+        RCM->CFG_B.APB1PSC = 4;            /* PCLK1 = HCLK / 2 = 36MHz */
+
+        RCM->CFG_B.PLLSRCSEL = 1;          /* PLL 源 = HSE */
+        RCM->CFG_B.PLLMULCFG = 7;          /* x9 */
+
+        RCM->CTRL_B.PLLEN = 1;
+        while(RCM->CTRL_B.PLLRDYFLG == BIT_RESET)
+        {
+        }
+
+        RCM->CFG_B.SCLKSEL = 2;            /* 切到 PLL */
+        while(RCM->CFG_B.SCLKSELSTS != 0x02)
+        {
+        }
+    }
+
+    SCB->VTOR = FMC_BASE | 0x3000;         /* 本 boot 的槽基址（原 VECT_TAB_OFFSET） */
 }
 
 /*!

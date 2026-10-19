@@ -400,6 +400,11 @@
               <FilePath>..\App\iap.c</FilePath>
             </File>
             <File>
+              <FileName>boot_printf.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\App\boot_printf.c</FilePath>
+            </File>
+            <File>
               <FileName>bsp_delay.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\App\bsp_delay.c</FilePath>
@@ -470,21 +475,6 @@
               <FilePath>..\Lib\APM32E10x_StdPeriphDriver\src\apm32e10x_bakpr.c</FilePath>
             </File>
             <File>
-              <FileName>apm32e10x_dma.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Lib\APM32E10x_StdPeriphDriver\src\apm32e10x_dma.c</FilePath>
-            </File>
-            <File>
-              <FileName>apm32e10x_gpio.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Lib\APM32E10x_StdPeriphDriver\src\apm32e10x_gpio.c</FilePath>
-            </File>
-            <File>
-              <FileName>apm32e10x_misc.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Lib\APM32E10x_StdPeriphDriver\src\apm32e10x_misc.c</FilePath>
-            </File>
-            <File>
               <FileName>apm32e10x_pmu.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Lib\APM32E10x_StdPeriphDriver\src\apm32e10x_pmu.c</FilePath>
@@ -493,16 +483,6 @@
               <FileName>apm32e10x_rcm.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\Lib\APM32E10x_StdPeriphDriver\src\apm32e10x_rcm.c</FilePath>
-            </File>
-            <File>
-              <FileName>apm32e10x_tmr.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Lib\APM32E10x_StdPeriphDriver\src\apm32e10x_tmr.c</FilePath>
-            </File>
-            <File>
-              <FileName>apm32e10x_usart.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>..\Lib\APM32E10x_StdPeriphDriver\src\apm32e10x_usart.c</FilePath>
             </File>
           </Files>
         </Group>

@@ -8,14 +8,15 @@ APM32E103 Boot Loader：通过 Quectel CAT-1 4G 模块进行远程固件升级�
 
 - **MCU**：APM32E103RE（ARM Cortex-M3，72MHz，512KB Flash / 128KB SRAM）
 - **4G 模块**：Quectel CAT-1 系列（EC800/EG800K），AT 指令集
-- **编译器**：ARMCC（Keil MDK v5）；GCC 亦可通过 `#ifdef` 块支持
-- **版本**：**v2.4.0.119**（**权威值在 `Include/main.h` 的 `VERSION`** —— 这份文档里的数字只是快照，改版本号时以文件为准）
+- **编译器**：ARMCC（Keil MDK v5，ARMCLANG 6.24）。纯 ARMCC 工程 —— 原先 `fputc` 里那段 GCC `#ifdef` 已于 2026-10-19 随 stdio 重定向一并删除（自定义 printf 不依赖编译器分支）
+- **版本**：**v2.5.0.100**（**权威值在 `Include/main.h` 的 `VERSION`** —— 这份文档里的数字只是快照，改版本号时以文件为准）
 - **字符编码**：C 源码统一 **UTF-8**（2026-09-18 由混合状态全量转换而来，与 IoT-4G-v2、引导区一致）
 
 ## 版本记录
 
 | 日期 | 版本 | 变更 |
 |------|------|------|
+| 2026-10-19 | **v2.5.0.100** | **原语重构批（保持 `-O2`）：app 22520B → 19432B（−3088B，−13.7%），槽余量 2044B → 5132B；RAM 48016B → 47972B**。目标是"用更精简的实现重写功能"，不换编译档位。五块：<br>① **自写 mini printf**（新增 `App/boot_printf.c`）：全工程只用到 6 种格式符（`%s/%d/%X/%02X/%lu/%08lX`），替掉库的 printf 引擎。库侧 `printf8/puts/stdout/init/handlers` 全部从镜像消失（−1428B），新实现 736B，净 **−~690B**。⚠️ 两个坑：**(a)** 名字必须叫 `boot_printf`、在 `main.h` 里用宏重定向 —— 直接定义 `printf` 会被编译器把 `printf("纯字面量")` 优化成库的 `puts`，整条 stdio 链又被拉回来（实测链接期 `printfa.o` 重复定义）；**(b)** `pf_fmt` 的四个助手必须 `noinline`，否则被内联复制成 1856B（与 FMC 同一个坑）。<br>② **删掉 `Upgrade_cfg_t` 整套机制**：三个地址本来就是编译期常量，那张 0x0807E800 的配置页**没有任何其他工程读**（2026-10-19 在 Collector-4G / IoT-4G-v2 / apm32_e103_bootstrap 三个仓库 grep 确认）。省一个全局结构、首次启动的一页擦写、`iap_init` 里的 CRC/迁移分支；**该 2KB 页现已空闲**。<br>③ **外设原语直写**（照 `hw_flash.c` 的先例）：`GPIO_Config`(596B)→~200B、`TMR_Reset`+`TMR_ConfigTimeBase`(490B)→~80B（**指示灯保留**）、DMA 六个函数(~500B)→~100B、`USART_Config`+`RCM_ReadPCLKFreq`(308B)→~90B、`NVIC_EnableIRQRequest`(94B)→0+`NVIC_EnableIRQ`、`SystemInit` 的时钟档位表 + `SystemCoreClockUpdate` → 直配 72MHz。**波特率算式与 SDK 逐字相同**（含截断方式），保证一个 LSB 不差。<br>④ **CRC32 换 16 项半字节表**（位算法 362B → ~100B + 64B 表；更快且更小），输出已用 Python `zlib.crc32` 对拍。<br>⑤ `serial_dl_getc()` 加 `noinline`（去掉库调用后变成纯寄存器读，被复制进三个调用点，实测 +280B）。<br>⑥ **工程**：又摘掉 5 个在手写原语后**贡献 0 字节**的 SDK 驱动（dma/gpio/misc/tmr/usart），现在参与编译的 SDK 只剩 **bakpr / pmu / rcm**，镜像逐字节不变；GCC/IAR 移植文件也随之失去意义（最后一个 GCC `#ifdef` 已删）。**版本号由 2.4.0.120 改为 2.5.0.100**（同一次提交，无代码差异）。<br>**验证**：全量重建 0 错 0 警；mini printf 的算法用 Python 复刻后对 **49 条实际格式串 × 294 组用例**与 C 语义逐字节比对，**0 处不一致**；摘 5 个 SDK 条目前后镜像逐字节相同。**待真机**：串口下载 / 4G OTA / boot 自升级三条路径都要跑 —— 尤其**时钟树**与**波特率**是这轮风险最高的两处。 |
 | 2026-10-16 | **v2.4.0.119** | **冗余体检批（行为零变化）+ 编译档位回退 `-O2`**：app **22520B**（以 v2.4.0.118 的 17992B 为基线：回退档位 **+4592B**、本批清理 **−64B**），槽余量 **2044B**。四块：<br>① **删死码** —— `Delay_us`/`cntUs`、`Delay_CheckTimeout()`、`USART1_Isr()` 及其 `USART1_IRQHandler` 蹦床（USART1 的 RXBNE 中断从未使能）、`main.c` 的 `count`、`main.h` 的 `extern tick`、`hw_uart.h` 三个无定义的悬空声明（`BufSize`/`dma_send_data`/`USART3_RX_DMA_Init`）、`AT_FILE_ERR_NOTFOUND`、未用的 `apm32e10x_adc.h`。<br>② **去掉一层中间态**：`at_wait()` 直接把命中的行用出参交出去，`at_transport.c` 的 `s_last_line[256]` 与 `at_get_last_line()` 整个删掉（原子性不变：仍是临界区内拷出的局部量）；`serial_dl_recv()` 用出参交回实际收到字节数，`serial_dl_get_rx_diag()` 删除；`expect_params_ok()` 与 `expect_params_ok_boot()` 合并成一个带 `max_size` 的函数（消除同构判据分叉）；`hw_flash_write()` 两个几乎相同的分支合并。<br>③ **工程/文件**：`.uvprojx` 摘掉 **16 个从不参与链接的 SDK 驱动源文件**（链接 map 证实它们一个字节都没进镜像），`CreateHexFile` 1 → 0（那份 `.hex` 无 CRC 尾、不可烧录，留着正是"拿错文件"陷阱）；scatter 里空的 `RW_IRAM2` 区删除。<br>④ **编译档位回退 `-Oz` → `-O2`**：`<Cads>` 的 MiscControls 清空即回到 GUI 的 `<Optim>3</Optim>`（原来那格写 `-Oz`，与 -O2 叠加、clang 取最后一个）。代价 **+4592B**，效果是 codegen 回到 .106~.117 那批**已经在真机上跑过**的档位（详见"编译档位"一节）。要再上 -Oz：把 `-Oz` 填回那一格。<br>**验证**：两种档位下全量重建均 0 错 0 警（`-Oz`：17928B/`0x17F1BEBC`；`-O2`：22520B/`0x42B3B10E`）；摘 SDK 条目那一步测过镜像**逐字节相同** —— 它只省编译时间、不改产物。**未做**：TMR5 指示灯（产品要求，保留）、`Upgrade_t` 的 `url[128]`/`name[64]`（布局四工程共用，需协调）、`Lib/` 的 gcc/iar 移植文件（`main.c` 仍有 GCC 分支，是备用工具链）。**待真机**：串口下载与 4G OTA 各跑一遍。 |
 | 2026-10-15 | **v2.4.0.118** | **编译档位 `-O2` → `-Oz`：app 22568B → 17992B（省 4576B，20%），槽余量 2008B → 6584B**。源码零改动（只动 `MDK/apm32e103_boot.uvprojx` 的 C 侧 Misc Controls），最大栈用量 844B → 836B。**换档位改变全部代码的生成方式 → 必须真机把串口下载与 4G OTA 两条路各跑一遍**，详见"编译档位 `-Oz`"一节。 |
 | 2026-10-15 | **v2.4.0.117** | 本批**唯一实质改动是版本号**（同 2.3.0.105 的先例）—— 为了走通平台下发的 boot 升级全链路。上一轮平台报"升级失败"的真因不是代码：平台上挂的 `IoT-Boot-2.4.0.116.bin` 与设备 A 槽里那份**逐字节相同**（`size=22568`、`crc=0xDC4DB298` 两边一致）→ APP 的 `app_ota_boot_current_match()` 直读 A 槽尾部即命中 → 走"已是最新"捷径，**一个字节都不下载**，回 `upgrade_result state=2`（`http_code:200` 是该路径写死的常量，不代表发过 HTTP）；平台只认 `state=3` 就判成失败。**平台侧建议：`state=2`（已是最新/无需升级）应判为成功**，否则每次推"当前版本"都会误报失败。<br>平台记录要填：`size=22568`、`crc=3834080009 (0xE4876B09)`，文件名必须以 `IoT-Boot` 开头（APP 按此前缀判定目标槽）。 |
@@ -85,15 +86,17 @@ main.c
   lte_modem.c/h  → 模块生命周期：电源引脚、RDY 重试、按型号配置
   upgrade_ctrl.c/h → 升级状态机、重试策略、40KB 分块缓冲区
   bsp_delay.c/h  → SysTick 延时（1ms 时基）、g_sys_tick 计数器
-  hw_uart.c/h    → USART1（调试，115200）+ USART3（4G 模块，115200）引脚配置
+  hw_uart.c/h    → USART1（调试，115200）+ USART3（4G 模块，115200），寄存器直写
+  boot_printf.c  → 极简 printf/snprintf（只支持 6 种格式符），替掉 C 库 stdio 引擎
   hw_flash.c/h   → 自带 FMC 原语（解锁/擦页/写字/上锁，替掉 SDK 的 1878B）
                    + hw_flash_erase/write/copy（页对齐擦除 + 逐字写入 + 拷贝）
   iap.c/h        → 启动决策、槽判据、升级元数据初始化/保存、结构体定义
   ram_flash.c/h  → RAM 常驻的 Flash 擦写例程（`.ramfunc` 段）：boot 自升级专用
 ```
 
-> 清单里 10 个 `.c` 与 `MDK/apm32e103_boot.uvprojx` 登记的自建源文件逐一对应，
-> 另加 `Source/main.c`、`Source/system_apm32e10x.c`，共 12 个 —— 这就是全部会参与
+> 清单里 11 个 `.c` 与 `MDK/apm32e103_boot.uvprojx` 登记的自建源文件逐一对应
+> （`boot_printf.c` 是 2026-10-19 新增的极简格式化器），
+> 另加 `Source/main.c`、`Source/system_apm32e10x.c`，共 13 个 —— 这就是全部会参与
 > 编译的代码。**磁盘上有、工程里没有的 `.c` 一律视为不存在**：不参与编译，改它没有
 > 任何效果。曾经的 `hw_board.c` 就是这种坑，详见已知问题 #8。
 
@@ -451,7 +454,7 @@ BAKPR 由 VBAT 维持、**跨掉电存活**，加新寄存器前必须全工程 
 QFREAD 的固定开销（AT 往返 + 模组起流延迟），它决定要不要把 `LTE_READ_CHUNK_SIZE`
 从 40KB 提上去（见"已知坑 #20"）。
 
-⚠️ **boot 槽余量 2044B**（22520 / 24576，`-O2` 档位；上 `-Oz` 则 6636B）—— 再加东西前先想好删什么。
+⚠️ **boot 槽余量 5132B**（19432 / 24576，`-O2` 档位）—— 再加东西前先想好删什么。
 
 ```c
 while (dl_retry < UPGRADE_MAX_DL_RETRIES) {
@@ -525,7 +528,8 @@ SDK 的 `apm32e10x_fmc.c` 编进镜像占 **1878B**（`FMC_ProgramWord` 1218 +
 
 > ⚠️ **2026-10-16 起默认又回到 `-O2`**（v2.4.0.119）：把 `<Cads>` 的 MiscControls 清空
 > 即可 —— GUI 的 `<Optim>3</Optim>` 本来就是 -O2。回退后 codegen 回到 .106~.117
-> 那批已经在真机上跑过的档位，代价 **+4592B**（17928B → 22520B，余量 2044B 仍够用）。
+> 那批已经在真机上跑过的档位，代价 **+4592B**（17928B → 22520B）。
+> 随后 2026-10-19 的原语重构（v2.5.0.100）又在 **-O2** 下省掉 3088B（→ **19432B**，余量 5132B）。
 > 下面这组数字与结论**保留作记录** —— 它证明 `-Oz` 值 4.6KB：把 `-Oz` 填回那一格即可复现。
 
 `MDK/apm32e103_boot.uvprojx` 的 **C 编译器 Misc Controls 里加上 `-Oz`**（当时与 `-O2` 叠加，
@@ -570,9 +574,22 @@ clang 取最后一个 `-O`，所以实际生效的是 `-Oz`）。**源码零改�
 - `Delay_ms()` 依赖 `SysTick_Handler` 递减 `cntMs` —— SysTick 停止则 `Delay_ms()` 挂起
   → 主流程不喂狗 → 外部 WDT 拉 NRST
 
-### Printf 重定向
+### Printf：自写极简格式化器（2026-10-19 起）
 
-`main.c` 实现 `fputc()`（ARMCC）/ `_write()`（GCC）将 printf 重定向到 USART1（调试串口，115200 波特）。所有诊断输出都走同一串口——保持 printf 内容简洁，避免在临界区内拖长时序。
+`App/boot_printf.c` 实现 `boot_printf()` / `boot_snprintf()`，`main.h` 用宏把
+`printf` / `snprintf` 重定向过去。只支持全工程实际用到的 6 种格式符
+（`%s %d %X %02X %lu %08lX`，外加 `%c`/`%%`），不支持精度与其他长度修饰符；
+不认识的格式符**原样输出**，不会静默吞参数。输出直接走
+`uart_send_data(USART1)`，不再经过 FILE*/fputc，因此库的 stdio 链
+（printf8/puts/stdout/init/handlers）**不再进镜像**（省 ~1.4KB）。
+
+两条硬约束（改这个文件前先读）：
+1. **函数不能直接叫 `printf`** —— 编译器会把 `printf("纯字面量")` 优化成库的
+   `puts`，整条 stdio 链又被拉回来（实测链接期 `printfa.o` 重复定义）。
+2. **`pf_fmt` 的四个助手必须 `noinline`** —— 否则被内联复制进各 switch 分支，
+   实测从 ~250B 膨胀到 1856B（与 `hw_flash.c` 的 FMC 是同一个坑）。
+
+所有诊断输出都走同一串口（115200）——保持内容简洁，避免在临界区内拖长时序。
 
 ## Flash 内存布局
 
@@ -584,7 +601,7 @@ clang 取最后一个 `-O`，所以实际生效的是 `-Oz`）。**源码零改�
 | 0x0800F000 | 214KB | APP A 槽（`APP_ADDR`，固定链接地址） |
 | 0x08044800 | 214KB | APP B 槽（`UP_BACKUP_ADDR`，最后一个已知良好版本） |
 | 0x0807E000 | 2KB | 升级元数据（`Upgrade_t`）← 本工程独享整页 |
-| 0x0807E800 | 2KB | 升级配置（`Upgrade_cfg_t`） |
+| 0x0807E800 | 2KB | **空闲**（原 `Upgrade_cfg_t` 配置页，2026-10-19 删除整套机制后不再使用） |
 
 Flash 页大小：2048 字节（`FLASH_PAGE_SIZE`）；固件大小上限 214KB
 （`APP_MAX_SIZE = 0x35800`，两个 APP 槽均为此容量）。
@@ -626,14 +643,8 @@ typedef struct {
   Firmware  fw[2];       // [0]=APP A 槽，[1]=APP B 槽（{size, crc}）
 } Upgrade_t;
 
-// Upgrade_cfg_t @ UPGRADE_CFG_ADDR (0x0807E800)
-typedef struct {
-  uint32_t  config_addr;  // UPGRADE_ADDR
-  uint32_t  app_addr;     // APP_ADDR
-  uint32_t  fw1_addr;     // UP_BACKUP_ADDR（保底区）
-  uint32_t  fw2_addr;     // 未使用（保留字段，填充为 UP_BACKUP_ADDR）
-  uint32_t  data_crc;     // 以上字段的 CRC32
-} Upgrade_cfg_t;
+// Upgrade_cfg_t（0x0807E800）已于 2026-10-19 删除：三个地址本来就是编译期常量，
+// 那张配置页没有任何其他工程读取。该 2KB 页现在空闲。
 ```
 
 **重要字段语义**：
@@ -645,7 +656,6 @@ typedef struct {
 - `upgrade.status`：**升级结果回传**（取代 trial）。Boot 写 `0x02`/`0x03`，
   APP 下次启动读走上报云端后清 `0x00`。详见"双区策略"
 - ⚠️ **两对 size/crc 别搞混**：顶层的 `size`/`crc` 是*待安装*的，`fw[n]` 是*已装进槽位*的
-- `upgrade_cfg`：自带 CRC 保护；首次启动初始化一次，提供基地址以便无需重新编译即可修改；**地址与当前布局不符（旧版本迁移）时自动重新初始化**
 - 空白 Flash 状态为 `0xFFFFFFFF`——校验时始终同时检查 `> 0` 且 `!= 0xFFFFFFFFU`（`FW_VALID` 宏）
 
 ## AT 命令函数（lte_modem.h / at_file_ops.h）
@@ -666,7 +676,6 @@ typedef struct {
 | 变量 | 位置 | 用途 |
 |----------|----------|---------|
 | `upgrade` | iap.c | 升级元数据（映射到 Flash 结构体） |
-| `upgrade_cfg` | iap.c | 升级配置（映射到 Flash 结构体） |
 | `up_file_buf[40960]` | upgrade_ctrl.c | 固件分块缓冲区（约 20 个 Flash 页），文件内 static；ISR 通过 `hw_uart3_start_raw_rx()` 直接写入 |
 | `s_line_queue[]` | at_transport.c | AT 响应行队列（8 项 × 256B），生产者 = ISR 回调 |
 | `s_uart3` | hw_uart3.c | 全部 USART3 ISR 状态（line_idx、原始计数、故障诊断）——文件内 static |
@@ -702,15 +711,16 @@ typedef struct {
    看门狗 GPIO，很容易在这个副本上动手，改了没有任何效果。
    同类教训见"未编译的孤儿文件"——留在磁盘上但不进工程的代码比删掉更危险。
 
-   > ⚠️ **2026-10-16 起，`Lib/APM32E10x_StdPeriphDriver/src/` 下有 16 个 .c 有意不进工程**
-   > （adc / can / crc / dac / dbgmcu / dmc / eint / fmc / i2c / iwdt / rtc / sci2c /
-   > sdio / smc / spi / wwdt）。链接 map 的 *Image component sizes* 表证实它们
-   > **一个字节都没进过镜像**，摘掉只省编译时间、产物逐字节不变（实测 crc 相同）。
+   > ⚠️ **2026-10-19 起，`Lib/APM32E10x_StdPeriphDriver/src/` 下有 23 个 .c 有意不进工程**
+   > （26 个里只剩 bakpr / pmu / rcm 参与编译；其余含 2026-10-16 摘掉的 16 个
+   > adc/can/crc/dac/dbgmcu/dmc/eint/fmc/i2c/iwdt/rtc/sci2c/sdio/smc/spi/wwdt、
+   > 2026-10-19 手写原语后零贡献的 5 个 dma/gpio/misc/tmr/usart，以及从未进过
+   > 工程的 usb/usb_device）。链接 map 的 *Image component sizes* 表证实它们
+   > **一个字节都没进过镜像**，摘掉只省编译时间、产物逐字节不变（实测镜像相同）。
    > 与上面 `hw_board.c` 的区别：那些是**厂商 SDK**，不是本工程代码，不存在
    > "改它以为能改 boot"的场景。**要在工程里用 SPI/I2C/RTC 时，先在 Keil 里把
    > 对应 .c 加回工程组**——只调它们的 API 而不加文件，链接期就会报未定义符号
-   > （比静默无效好，但仍要走这一步）。工程里参与编译的 SDK 驱动只剩 8 个：
-   > bakpr / dma / gpio / misc / pmu / rcm / tmr / usart。
+   > （比静默无效好，但仍要走这一步）。
 9. **`LTE_READ_CHUNK_SIZE = 40960`**：40KB 的缓冲区（加上 2KB 传输层行队列）约占 SRAM 的 35%（APM32E103RE 为 128KB，IRAM 已配置全片）。**RAM 侧已核算**（2026-10-14，`MDK/Listings/apm32e103_boot.map`）：`RW_IRAM1` 用 48384B / 上限 126976B，加到 96KB 后仍剩 20.75KB（栈顶距 `ER_RAMFUNC` 0x2001F000），理论上限 119552B —— 但**能不能加不由 RAM 决定，由模组的 `AT+QFREAD` 单块上限决定**（见 #20）。
 10. **Keil 工程是构建真相**：没有 Makefile。源文件包含、头文件路径、编译器宏全部配置在 `.uvprojx` XML 中。增删文件时必须同步更新工程文件。
 11. **编码已统一为 UTF-8（2026-09-18）**：原先 `.c`/`.h` 既 GBK 又 UTF-8，现已全量转为
