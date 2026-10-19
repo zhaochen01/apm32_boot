@@ -93,16 +93,16 @@ void    serial_dl_flush(void);
  * 调用方的 `if (c < 0)` 静默失效（本项目踩过一次）。 */
 int32_t serial_dl_getc(void);
 
-/* 接收诊断：got = 最近一次 recv 超时时【已收到】的字节数
- * （区分"对端没发"与"中途断流"）。入参可传 NULL。 */
-void serial_dl_get_rx_diag(uint32_t *got);
 
 /* 发静态 ASCII 串 / 单字节。返回 0 成功、-1 失败（TX 卡死，见 uart_send_data）。 */
 int32_t serial_dl_send(const char *s);
 int32_t serial_dl_send_byte(uint8_t b);
 
-/* 阻塞收满 len 字节，超时返回 -1。等待期间按 100ms 节流喂外部看门狗。 */
-int32_t serial_dl_recv(uint8_t *buf, uint32_t len, uint32_t timeout_ms);
+/* 阻塞收满 len 字节，超时返回 -1。等待期间按 100ms 节流喂外部看门狗。
+ * *got（可传 NULL）= 本次【实际】收到的字节数 —— 超时时靠它区分
+ * 对端没发（接近 0）与中途断流（接近 len）。 */
+int32_t serial_dl_recv(uint8_t *buf, uint32_t len, uint32_t timeout_ms,
+                       uint32_t *got);
 
 /* 取整（不等待）并把 USART1 切到 baud。返回 0 成功、-1 失败。
  * 只改这一个口，不落盘；调用点必须保证此刻 TX 已空（内部的 TC 等待负责）。 */

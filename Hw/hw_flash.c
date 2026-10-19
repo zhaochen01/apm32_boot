@@ -179,35 +179,23 @@ int32_t hw_flash_write(uint32_t addrStart, const void *pdata, uint32_t size)
 {
   const uint8_t *p = (const uint8_t *)pdata;
   uint32_t offset = 0U;
-  uint32_t word;
 
   /* 如实报错：原实现把 FMC_ProgramWord 的结果丢掉、恒返回 0，
    * 编程失败对调用方完全不可见。 */
   fmc_unlock();
   while(offset < size)
   {
-    word = 0xFFFFFFFFU;          /* 末字不足 4 字节时用 0xFF 补：Flash 只能把 1 清成 0 */
-    if((size - offset) >= 4U)
+    uint32_t n    = size - offset;
+    uint32_t word = 0xFFFFFFFFU;  /* 末字不足 4 字节时用 0xFF 补：Flash 只能把 1 清成 0 */
+
+    if(n > 4U) n = 4U;
+    memcpy(&word, p + offset, n);
+    if(fmc_prog_word(addrStart + offset, word) != 0)
     {
-      memcpy(&word, p + offset, 4U);
-      if(fmc_prog_word(addrStart + offset, word) != 0)
-      {
-        fmc_lock();
-        return -1;
-      }
-      offset += 4U;
+      fmc_lock();
+      return -1;
     }
-    else
-    {
-      uint8_t rem = (uint8_t)(size - offset);
-      memcpy(&word, p + offset, rem);
-      if(fmc_prog_word(addrStart + offset, word) != 0)
-      {
-        fmc_lock();
-        return -1;
-      }
-      break;
-    }
+    offset += n;
   }
   fmc_lock();
   return 0;

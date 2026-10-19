@@ -41,8 +41,6 @@
 
 #define DEBUG_USART USART1
 
-uint8_t count = 0;
-
 
 
 

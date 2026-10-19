@@ -39,7 +39,6 @@
 #include "apm32e10x_dma.h"
 #include "apm32e10x_misc.h"
 #include "apm32e10x_pmu.h"
-#include "apm32e10x_adc.h"
 #include "apm32e10x_fmc.h"
 #include "apm32e10x_bakpr.h"
 #include "apm32e10x_tmr.h"
@@ -47,13 +46,12 @@
 
 
 
-#define VERSION "2.4.0.118\0"
+#define VERSION "2.4.0.119\0"
 
 
 #define FLASH_PAGE_SIZE 2048
 
 
-void USART1_Isr(void);
 void USART3_Isr(void);
 
 
@@ -72,9 +70,6 @@ typedef struct
 
 
 
-
-/* extern variables */
-extern volatile uint32_t tick;
 
 void hw_gpio_init( HW_GPIO_INIT_T gpio_cfg);
 

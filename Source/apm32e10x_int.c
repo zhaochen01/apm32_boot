@@ -164,19 +164,6 @@ void PendSV_Handler(void)
 //}
 
 /*!
- * @brief   This function handles USART1 Handler
- *
- * @param   None
- *
- * @retval  None
- *
- */
-void USART1_IRQHandler(void)
-{
-    USART1_Isr();
-}
-
-/*!
  * @brief   This function handles USART3 Handler
  *
  * @param   None

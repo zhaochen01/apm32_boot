@@ -164,26 +164,3 @@ int32_t user_uart_set_baud(USART_T *usart, uint32_t baud)
 
 	return 0;
 }
-
-
-
-/*!
- * @brief       USART1_Interrupt
- *
- * @param       None
- *
- * @retval      None
- *
- */
-void USART1_Isr(void)
-{
-  /* �쳣����ʱ���־��������ѭ�� */
-  if(USART_ReadIntFlag(USART1, USART_INT_RXBNE))
-  {
-    (void)USART_RxData(USART1);
-  }
-  USART_ClearIntFlag(USART1, USART_INT_RXBNE);
-}
-
-
-

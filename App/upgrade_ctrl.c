@@ -396,8 +396,8 @@ static void upgrade_self_run(void)
  * 【为什么可以阻塞轮询、不开中断】
  * 节奏由 ACK 控制，本来就没有并发。轮询循环约 10 cycle/字节，而字节
  * 间隔 6250 cycle（87us @72MHz）-> 占空比 0.16%。
- * 不引入 ISR 还避开了一个必须靠手册背书的论证：本工程 USART1 的 RXNE
- * 中断从不使能（hw_uart.c 的 USART1_Isr 是死代码，只有 USART3 开了中断），
+ * 不引入 ISR 还避开了一个必须靠手册背书的论证：本工程 USART1 的 RXBNE
+ * 中断从不使能（只有 USART3 开了中断，USART1 连 handler 都没登记），
  * 所以收页路径上没有任何东西会和轮询抢字节。开中断去收反而会引入这个风险。
  *
  * 【复用】页缓冲直接用 up_file_buf 的前 2KB（QFDEL/QFREAD 那条路与
@@ -566,16 +566,13 @@ static void upgrade_serial_run(const UPGRADE_CTX_T *ctx)
   while(off < size)
   {
     uint32_t chunk = size - off;
+    uint32_t dgot  = 0u;
     int32_t  fres;
 
     if(chunk > FLASH_PAGE_SIZE) chunk = FLASH_PAGE_SIZE;
 
-    if(serial_dl_recv(page, chunk, SERIAL_DL_RX_TIMEOUT_MS) < 0)
+    if(serial_dl_recv(page, chunk, SERIAL_DL_RX_TIMEOUT_MS, &dgot) < 0)
     {
-      uint32_t dgot = 0u;
-
-      serial_dl_get_rx_diag(&dgot);
-
       serial_dl_send_byte(SERIAL_DL_NAK);   /* 先回 NAK 再打印，别抢线 */
       /* got 是定位"谁丢了字节"的证据：接近满 -> 中途断流；≈0 -> 对端没发 */
       printf("[serial] rx timeout at off=%lu got=%lu/%lu\r\n",

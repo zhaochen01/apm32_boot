@@ -42,9 +42,6 @@ void Delay_Init(void);
 // 阻塞式毫秒延时
 void Delay_ms(uint32_t ms);
 
-// 非阻塞式延时：检查是否超时（返回1表示超时，0表示未超时）
-uint8_t Delay_CheckTimeout(uint32_t *start_tick, uint32_t ms);
-
 // 获取当前系统滴答数（ms级）
 uint32_t Delay_GetTick(void);
 

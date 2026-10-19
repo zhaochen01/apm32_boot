@@ -36,8 +36,6 @@ static volatile uint8_t s_queue_head = 0U;   /* written by ISR callback */
 static uint8_t          s_queue_tail = 0U;   /* written by at_wait */
 static volatile uint8_t s_queue_count = 0U;
 
-static char s_last_line[AT_LINE_MAX_LEN];
-
 /* raw reception state */
 static volatile uint8_t  s_raw_armed = 0U;
 static volatile uint8_t  s_raw_done = 0U;
@@ -201,7 +199,6 @@ void at_transport_init(void)
   s_queue_head = 0U;
   s_queue_tail = 0U;
   s_queue_count = 0U;
-  s_last_line[0] = '\0';
   s_raw_armed = 0U;
   s_raw_done = 0U;
   s_raw_fault = 0U;
@@ -227,7 +224,8 @@ int32_t at_send(const char *cmd)
   return AT_ERR_OK;
 }
 
-int32_t at_wait(const char *target, AT_MATCH_MODE_T mode, uint32_t timeout_ms)
+int32_t at_wait(const char *target, AT_MATCH_MODE_T mode, uint32_t timeout_ms,
+                char *line_out, uint16_t out_size)
 {
   uint32_t start_tick;
   uint32_t timeout;
@@ -265,8 +263,13 @@ int32_t at_wait(const char *target, AT_MATCH_MODE_T mode, uint32_t timeout_ms)
 
       if(match_line(line, target, mode) == 0)
       {
-        (void)strncpy(s_last_line, line, AT_LINE_MAX_LEN - 1U);
-        s_last_line[AT_LINE_MAX_LEN - 1U] = '\0';
+        /* 交出去的必须是【本轮行】的副本 —— line 是临界区里拷出来的局部量，
+         * 调用方拿到后可以随便解析，不会和 ISR 抢队列里的那个槽。 */
+        if((line_out != NULL) && (out_size > 0U))
+        {
+          (void)strncpy(line_out, line, out_size - 1U);
+          line_out[out_size - 1U] = '\0';
+        }
         return AT_ERR_OK;
       }
       __disable_irq();
@@ -284,7 +287,8 @@ int32_t at_wait(const char *target, AT_MATCH_MODE_T mode, uint32_t timeout_ms)
 }
 
 int32_t at_send_wait(const char *cmd, const char *target,
-                     AT_MATCH_MODE_T mode, uint32_t timeout_ms)
+                     AT_MATCH_MODE_T mode, uint32_t timeout_ms,
+                     char *line_out, uint16_t out_size)
 {
   int32_t ret;
 
@@ -294,7 +298,7 @@ int32_t at_send_wait(const char *cmd, const char *target,
   {
     return ret;
   }
-  return at_wait(target, mode, timeout_ms);
+  return at_wait(target, mode, timeout_ms, line_out, out_size);
 }
 
 void at_flush_rx(void)
@@ -321,21 +325,6 @@ void at_flush_rx(void)
   s_raw_buf = NULL;
   s_raw_buf_size = 0U;
   __enable_irq();
-}
-
-int32_t at_get_last_line(char *buf, uint16_t buf_size)
-{
-  if((buf == NULL) || (buf_size == 0U))
-  {
-    return AT_ERR_PARAM;
-  }
-  if(s_last_line[0] == '\0')
-  {
-    return AT_ERR_NOMATCH;
-  }
-  (void)strncpy(buf, s_last_line, buf_size - 1U);
-  buf[buf_size - 1U] = '\0';
-  return AT_ERR_OK;
 }
 
 void at_arm_raw_rx(uint8_t *buf, uint32_t buf_size)

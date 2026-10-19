@@ -17,7 +17,4 @@ LR_IROM1 0x08003000 0x00006000  {      ; 加载区 = 24KB boot 槽
   RW_IRAM1 0x20000000 0x0001F000  {    ; RW/ZI 数据
    .ANY (+RW +ZI)
   }
-  RW_IRAM2 0x2001F800 UNINIT 0x00000800  {
-   .ANY (+RW +ZI)
-  }
 }

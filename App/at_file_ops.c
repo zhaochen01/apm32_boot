@@ -4,10 +4,10 @@
  * @brief       File operations on the 4G module UFS via AT commands:
  *              AT+QFOPEN / AT+QFLST / AT+QFREAD / AT+QFCLOSE.
  *
- *              Response parsing uses at_get_last_line() (an atomic
- *              snapshot of the matched line) instead of reading the
- *              ISR buffer directly, removing the race of the legacy
- *              implementation.
+ *              Response parsing works on the line that at_wait() hands
+ *              back (an atomic snapshot copied out under the lock)
+ *              instead of reading the ISR buffer directly, removing
+ *              the race of the legacy implementation.
  */
 
 #include "main.h"
@@ -31,12 +31,8 @@ static int32_t parse_qfopen_fd(const char *line)
   {
     return -1;
   }
-  p = strchr(p, ':');
-  if(p == NULL)
-  {
-    return -1;
-  }
-  p++;
+  p += 8;   /* 跳过 "+QFOPEN:" 这 8 个字符 —— 冒号就在匹配到的字面量里，
+             * 再 strchr 一次是白找（旧写法还多一个 NULL 分支） */
   while((*p == ' ') || (*p == '\t'))
   {
     p++;
@@ -114,11 +110,8 @@ int32_t at_file_open(AT_FILE_CTX_T *ctx, const char *filename)
   ctx->filename = filename;
 
   (void)snprintf(cmd, sizeof(cmd), "AT+QFOPEN=\"%s\",2\r\n", filename);
-  if(at_send_wait(cmd, "+QFOPEN:", AT_MATCH_CONTAINS, AT_FILE_OPEN_TIMEOUT_MS) != AT_ERR_OK)
-  {
-    return AT_FILE_ERR_OPEN;
-  }
-  if(at_get_last_line(resp, sizeof(resp)) != AT_ERR_OK)
+  if(at_send_wait(cmd, "+QFOPEN:", AT_MATCH_CONTAINS, AT_FILE_OPEN_TIMEOUT_MS,
+                  resp, sizeof(resp)) != AT_ERR_OK)
   {
     return AT_FILE_ERR_OPEN;
   }
@@ -145,11 +138,8 @@ int32_t at_file_get_size(AT_FILE_CTX_T *ctx)
   }
 
   (void)snprintf(cmd, sizeof(cmd), "AT+QFLST=\"%s\"\r\n", ctx->filename);
-  if(at_send_wait(cmd, "+QFLST:", AT_MATCH_CONTAINS, AT_FILE_FLST_TIMEOUT_MS) != AT_ERR_OK)
-  {
-    return AT_FILE_ERR_SIZE;
-  }
-  if(at_get_last_line(resp, sizeof(resp)) != AT_ERR_OK)
+  if(at_send_wait(cmd, "+QFLST:", AT_MATCH_CONTAINS, AT_FILE_FLST_TIMEOUT_MS,
+                  resp, sizeof(resp)) != AT_ERR_OK)
   {
     return AT_FILE_ERR_SIZE;
   }
@@ -192,7 +182,8 @@ int32_t at_file_read(AT_FILE_CTX_T *ctx, uint8_t *buf, uint32_t buf_size,
 
   /* wait for the CONNECT header; the raw stream starts inside the
    * ISR callback, so no data is lost between header and stream */
-  ret = at_wait("CONNECT ", AT_MATCH_CONTAINS, AT_FILE_READ_CMD_TIMEOUT_MS);
+  ret = at_wait("CONNECT ", AT_MATCH_CONTAINS, AT_FILE_READ_CMD_TIMEOUT_MS,
+                NULL, 0U);
   if(ret != AT_ERR_OK)
   {
     at_disarm_raw_rx();
@@ -245,7 +236,8 @@ int32_t at_file_close(AT_FILE_CTX_T *ctx)
   }
 
   (void)snprintf(cmd, sizeof(cmd), "AT+QFCLOSE=%d\r\n", (int)ctx->fd);
-  ret = at_send_wait(cmd, "OK", AT_MATCH_EXACT, AT_FILE_CLOSE_TIMEOUT_MS);
+  ret = at_send_wait(cmd, "OK", AT_MATCH_EXACT, AT_FILE_CLOSE_TIMEOUT_MS,
+                     NULL, 0U);
 
   ctx->fd = -1;
   return (ret == AT_ERR_OK) ? AT_FILE_ERR_OK : AT_FILE_ERR_CLOSE;
@@ -262,7 +254,8 @@ int32_t at_file_delete(const char *filename)
   }
 
   (void)snprintf(cmd, sizeof(cmd), "AT+QFDEL=\"%s\"\r\n", filename);
-  ret = at_send_wait(cmd, "OK", AT_MATCH_EXACT, AT_FILE_DELETE_TIMEOUT_MS);
+  ret = at_send_wait(cmd, "OK", AT_MATCH_EXACT, AT_FILE_DELETE_TIMEOUT_MS,
+                     NULL, 0U);
 
   return (ret == AT_ERR_OK) ? AT_FILE_ERR_OK : AT_FILE_ERR_DELETE;
 }

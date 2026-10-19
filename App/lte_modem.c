@@ -67,7 +67,8 @@ static void modem_power_cycle(uint32_t hold_ms)
 static int32_t modem_wait_rdy(const LTE_MODEM_CFG_T *cfg)
 {
   at_flush_rx();
-  if(at_wait(cfg->rdy_pattern, AT_MATCH_CONTAINS, cfg->rdy_timeout_ms) == AT_ERR_OK)
+  if(at_wait(cfg->rdy_pattern, AT_MATCH_CONTAINS, cfg->rdy_timeout_ms,
+             NULL, 0U) == AT_ERR_OK)
   {
     return LTE_MODEM_ERR_OK;
   }
@@ -77,11 +78,13 @@ static int32_t modem_wait_rdy(const LTE_MODEM_CFG_T *cfg)
 static int32_t modem_at_channel_check(void)
 {
   /* basic AT sanity check + disable echo */
-  if(at_send_wait("AT\r\n", "OK", AT_MATCH_EXACT, LTE_MODEM_AT_TIMEOUT_MS) != AT_ERR_OK)
+  if(at_send_wait("AT\r\n", "OK", AT_MATCH_EXACT, LTE_MODEM_AT_TIMEOUT_MS,
+                  NULL, 0U) != AT_ERR_OK)
   {
     return LTE_MODEM_ERR_TIMEOUT;
   }
-  if(at_send_wait("ATE0\r\n", "OK", AT_MATCH_EXACT, LTE_MODEM_AT_TIMEOUT_MS) != AT_ERR_OK)
+  if(at_send_wait("ATE0\r\n", "OK", AT_MATCH_EXACT, LTE_MODEM_AT_TIMEOUT_MS,
+                  NULL, 0U) != AT_ERR_OK)
   {
     return LTE_MODEM_ERR_TIMEOUT;
   }

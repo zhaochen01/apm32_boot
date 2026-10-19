@@ -39,18 +39,18 @@ void    at_transport_init(void);
 /* send an AT command string (must include \r\n terminator) */
 int32_t at_send(const char *cmd);
 
-/* wait for a response line matching target within timeout_ms */
-int32_t at_wait(const char *target, AT_MATCH_MODE_T mode, uint32_t timeout_ms);
+/* wait for a response line matching target within timeout_ms.
+ * line_out / out_size（可传 NULL / 0）收下命中那一行 —— 它是从 ISR 队列里
+ * 原子拷出来的快照，调用方直接解析它，不要自己去读队列。 */
+int32_t at_wait(const char *target, AT_MATCH_MODE_T mode, uint32_t timeout_ms,
+                char *line_out, uint16_t out_size);
 
 /* flush pending rx, send command, then wait for response */
-int32_t at_send_wait(const char *cmd, const char *target,
-                     AT_MATCH_MODE_T mode, uint32_t timeout_ms);
+int32_t at_send_wait(const char *cmd, const char *target, AT_MATCH_MODE_T mode,
+                     uint32_t timeout_ms, char *line_out, uint16_t out_size);
 
 /* discard all buffered rx data and reset transient fault state */
 void    at_flush_rx(void);
-
-/* copy the last matched line (for response parsing) */
-int32_t at_get_last_line(char *buf, uint16_t buf_size);
 
 /* arm raw reception: if the next complete line is "CONNECT <len>",
  * the following <len> bytes stream into buf automatically (ISR context).

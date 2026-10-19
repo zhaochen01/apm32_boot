@@ -48,8 +48,6 @@ void serial_dl_flush(void)
  *
  * 只在 getc 里【按位累加】，不改变状态：先读一次 STS（ORE/FE/NE/RXBNE 都在里面），
  * 再按需读 DATA —— 读 STS+DR 正是清 ORE 的规定序列。 */
-static uint32_t s_rx_last_got = 0u;   /* 最近一次 recv 超时时已收到的字节数 */
-
 int32_t serial_dl_getc(void)
 {
   uint32_t sts = DL_USART->STS;
@@ -82,11 +80,6 @@ int32_t serial_dl_getc(void)
     (void)DL_USART->DATA;
   }
   return -1;
-}
-
-void serial_dl_get_rx_diag(uint32_t *got)
-{
-  if(got != NULL) *got = s_rx_last_got;
 }
 
 int32_t serial_dl_send(const char *s)
@@ -158,11 +151,13 @@ static void serial_dl_dma_setup(void)
 
 /* 收满 len 字节返回 len；超时返回 -1（已收字节数进诊断）。语义与旧的轮询版
  * 完全一致，只是搬运由 DMA 做 —— 上层（收页循环）一行都不用改。 */
-int32_t serial_dl_recv(uint8_t *buf, uint32_t len, uint32_t timeout_ms)
+int32_t serial_dl_recv(uint8_t *buf, uint32_t len, uint32_t timeout_ms,
+                       uint32_t *got)
 {
   uint32_t start;
   uint32_t last_feed;
 
+  if(got != NULL) *got = 0u;
   if((buf == NULL) || (len == 0u)) return -1;
   if(s_dma_ready == 0u)
   {
@@ -188,9 +183,12 @@ int32_t serial_dl_recv(uint8_t *buf, uint32_t len, uint32_t timeout_ms)
     if((DMA_ReadStatusFlag(DMA1_FLAG_TERR5) != RESET) ||
        ((uint32_t)(Delay_GetTick() - start) >= timeout_ms))
     {
-      /* 超时/传输出错：把【已搬进来的字节数】记进诊断 —— 它区分
+      /* 超时/传输出错：把【已搬进来的字节数】交出去 —— 它区分
        * "对端没发"（接近 0）与"中途断流"（接近满）。 */
-      s_rx_last_got = len - (uint32_t)DMA_ReadDataNumber(DL_DMA_CH);
+      if(got != NULL)
+      {
+        *got = len - (uint32_t)DMA_ReadDataNumber(DL_DMA_CH);
+      }
       DMA_Disable(DL_DMA_CH);
       DMA_ClearStatusFlag(DL_DMA_FLAGS);
       return -1;
@@ -200,6 +198,7 @@ int32_t serial_dl_recv(uint8_t *buf, uint32_t len, uint32_t timeout_ms)
 
   DMA_Disable(DL_DMA_CH);
   DMA_ClearStatusFlag(DL_DMA_FLAGS);
+  if(got != NULL) *got = len;
   return (int32_t)len;
 }
 

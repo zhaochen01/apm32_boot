@@ -147,20 +147,14 @@ static void drop_request(void)
   iap_state_flush();
 }
 
-/* boot 自升级的参数可信性：上限是 boot 槽容量，不是 APP 的 214KB */
-static int32_t expect_params_ok_boot(uint32_t size, uint32_t crc)
-{
-  if(size == 0u || size == 0xFFFFFFFFu) return 0;
-  if(size > BOOT_SLOT_MAX_IMAGE)        return 0;
-  if(crc == 0u || crc == 0xFFFFFFFFu)   return 0;
-  return 1;
-}
-
-/* 安装参数可信性：空片 / 越界一律拒绝，绝不拿坏参数去擦运行区 */
-static int32_t expect_params_ok(uint32_t size, uint32_t crc)
+/* 安装参数可信性：空片 / 越界一律拒绝，绝不拿坏参数去擦运行区。
+ * max_size 由调用方给 —— 装 APP 是 APP_MAX_SIZE(214KB)，boot 自升级是
+ * BOOT_SLOT_MAX_IMAGE(24564)：判据逐条相同、只有上限不同，所以只写一份。
+ * （原有两份各自演化，正是 CLAUDE.md 反复警告的"同构判据分叉"。） */
+static int32_t expect_params_ok(uint32_t size, uint32_t crc, uint32_t max_size)
 {
   if(size == 0U || size == 0xFFFFFFFFU) return 0;
-  if(size > APP_MAX_SIZE)               return 0;
+  if(size > max_size)                   return 0;
   if(crc == 0U || crc == 0xFFFFFFFFU)   return 0;
   return 1;
 }
@@ -268,7 +262,7 @@ int32_t iap_init(UPGRADE_CTX_T *ctx)
   {
   /* ============ 安装请求（APP 主动发起） ============ */
   case 0x3A:
-    if(expect_params_ok(upgrade.size, upgrade.crc))
+    if(expect_params_ok(upgrade.size, upgrade.crc, APP_MAX_SIZE))
     {
       ctx->action      = UPGRADE_ACTION_NETWORK;
       ctx->expect_size = upgrade.size;
@@ -285,7 +279,7 @@ int32_t iap_init(UPGRADE_CTX_T *ctx)
    * 参数校验走同一套：APP 已把云端下发的 size/crc 写进顶层字段，
    * 这里只需确认可信（镜像实际长度上限由 upgrade_self_run 再检一次）。 */
   case 0x3B:
-    if(expect_params_ok_boot(upgrade.size, upgrade.crc))
+    if(expect_params_ok(upgrade.size, upgrade.crc, BOOT_SLOT_MAX_IMAGE))
     {
       ctx->action      = UPGRADE_ACTION_SELF;
       /* expect_* 必须一起填：upgrade_run() 开头有个【共用】的参数检查

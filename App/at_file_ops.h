@@ -6,7 +6,6 @@
 /* file operation error codes */
 #define AT_FILE_ERR_OK            0
 #define AT_FILE_ERR_OPEN         (-1)
-#define AT_FILE_ERR_NOTFOUND     (-2)
 #define AT_FILE_ERR_SIZE         (-3)
 #define AT_FILE_ERR_READ_FAULT   (-4)
 #define AT_FILE_ERR_READ_TIMEOUT (-5)
